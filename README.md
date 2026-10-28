@@ -1,90 +1,64 @@
-# NDR Backend (Go)
+# NDR Backend
 
-Центральный API учебной системы Network Detection and Response. Принимает flow-метаданные от C#-сенсора, сохраняет их в PostgreSQL, вызывает ML-сервис, формирует инциденты и отдаёт данные dashboard.
+Backend учебной системы **Network Detection and Response** на Go.
 
-Спецификации команды лежат в `ndr-cursor-backend-kit/` (`BACKEND_SPEC.md`, `API_CONTRACTS.md`, `DATABASE.md`, `TEST_PLAN.md`).
+Система пассивно анализирует метаданные сетевых сессий: сенсор (C#) отправляет потоки, backend сохраняет их в PostgreSQL, ML-сервис оценивает класс трафика, backend формирует инциденты и отдаёт данные веб-панели. При необходимости — уведомления в Telegram.
 
-## Текущий статус (этап 02 — database)
+Автоматическая блокировка адресов **не** выполняется: рекомендации только для оператора.
 
-Работает каркас приложения:
-- конфигурация из env / `.env`
-- `GET /healthz` / `GET /readyz`
-- Docker Compose (PostgreSQL + backend)
-- схема PostgreSQL через **goose**: `network_flows`, `network_nodes`, `network_edges`, `incidents`, `whitelist_schedules`
-- репозитории pgx (`internal/repository/postgres`)
+## Что уже готово
 
-Ещё не реализовано: HTTP-приём flows, ML, инциденты API, топология, Telegram, WebSocket.
+- Запуск API на Go (Gin) с конфигурацией через переменные окружения
+- Проверки живости и готовности: `GET /healthz`, `GET /readyz`
+- PostgreSQL в Docker Compose
+- Схема БД и миграции (goose): потоки, узлы, связи, инциденты, whitelist-расписания
+- Репозитории для работы с этими таблицами
+- Базовые автотесты и команды сборки/проверки
 
-### Миграции
+## Что планируется дальше
 
-Нужен CLI [goose](https://github.com/pressly/goose). Схема **не** применяется при старте API — только явно:
+1. Приём батчей потоков от сенсора (`POST /api/v1/flows`)
+2. Интеграция с ML-сервисом и правила формирования инцидентов
+3. API инцидентов, топологии и статистики для панели
+4. Уведомления в Telegram (опционально)
+5. Realtime-события по WebSocket
 
-```bash
-docker compose up -d postgres
-make migrate-up
-make migrate-status
-```
-
-Timezone для `whitelist_schedules`: backend интерпретирует `start_time` / `end_time` / `days_of_week` в **UTC**.
-
-Идентификатор узла: `mac:<AA:BB:…>` если MAC есть, иначе `ip:<address>`. MAC не является универсальным PK.
-
-**Безопасность учебного стенда:** dashboard API на следующих этапах без пользовательской авторизации. Это не production-ready.
-
-## Требования
+## Стек
 
 - Go 1.22+
-- Docker Desktop (для Compose / интеграционных проверок)
-- (позже) [goose](https://github.com/pressly/goose) для миграций
+- Gin, pgx, PostgreSQL 16
+- Docker Compose
+- goose (миграции)
 
 ## Быстрый старт
 
+Нужны: Go, Docker Desktop, [goose](https://github.com/pressly/goose).
+
 ```bash
 cp .env.example .env
-# отредактируйте SENSOR_API_KEY и при необходимости DATABASE_URL
-
-# Локально (нужен запущенный PostgreSQL, например через Compose)
 docker compose up -d postgres
+make migrate-up
 go run ./cmd/api
 ```
 
-Проверки:
+Проверка:
 
 ```bash
 curl http://localhost:8080/healthz
 curl http://localhost:8080/readyz
 ```
 
-Полный стек:
+Обязательные переменные в `.env`: `DATABASE_URL`, `SENSOR_API_KEY`.  
+Файл `.env` в git не коммитится.
 
-```bash
-docker compose up --build
-```
+## Полезные команды
 
-## Переменные окружения
-
-См. `.env.example`. Обязательные:
-- `DATABASE_URL`
-- `SENSOR_API_KEY`
-
-Опциональные (приложение стартует без них): Telegram, LLM, URL ML-сервиса.
-
-Секреты в репозиторий не коммитить. В `.env` только локальные/учебные значения.
-
-## Makefile
-
-| Цель | Назначение |
-|------|------------|
+| Команда | Назначение |
+|---------|------------|
 | `make run` | запуск API |
-| `make test` | `go test ./...` |
-| `make vet` | `go vet ./...` |
-| `make fmt` | `gofmt -w .` |
-| `make check` | fmt + vet + test |
-| `make migrate-up` | миграции (этап 02) |
-| `make docker-up` | Compose up --build |
+| `make test` | тесты |
+| `make check` | форматирование + vet + тесты |
+| `make migrate-up` | применить миграции |
+| `make docker-up` | поднять Compose |
 
-## Ограничения
-
-- In-memory очереди (появятся позже) не переживают перезапуск.
-- Автоматическая блокировка IP не выполняется; `recommended_action` — только рекомендация оператору.
-- Производительность 500–5000 сессий/с не заявляется без измерений.
+Миграции нужно запускать отдельно — при старте API схема сама не создаётся.
