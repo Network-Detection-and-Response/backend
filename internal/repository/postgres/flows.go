@@ -84,3 +84,10 @@ func (s *Store) CountFlows(ctx context.Context) (int64, error) {
 	err := s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM network_flows`).Scan(&n)
 	return n, err
 }
+
+// CountFlowsByBatchID returns how many flows were stored for a batch.
+func (s *Store) CountFlowsByBatchID(ctx context.Context, batchID uuid.UUID) (int64, error) {
+	var n int64
+	err := s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM network_flows WHERE batch_id = $1`, batchID).Scan(&n)
+	return n, err
+}

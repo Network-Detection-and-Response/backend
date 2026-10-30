@@ -28,3 +28,6 @@ Thumbs.db
 # Go workspace (local)
 go.work
 go.work.sum
+
+.cursor/
+ndr-cursor-backend-kit/

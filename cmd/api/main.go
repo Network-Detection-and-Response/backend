@@ -12,6 +12,7 @@ import (
 	httpapi "github.com/Network-Detection-and-Response/backend/internal/http"
 	"github.com/Network-Detection-and-Response/backend/internal/observability"
 	"github.com/Network-Detection-and-Response/backend/internal/repository/postgres"
+	"github.com/Network-Detection-and-Response/backend/internal/service/ingestion"
 )
 
 func main() {
@@ -25,6 +26,8 @@ func main() {
 	log := observability.NewLogger(cfg.LogLevel)
 	log.Info("starting",
 		"http_addr", cfg.HTTPAddr,
+		"queue_capacity", cfg.QueueCapacity,
+		"worker_count", cfg.WorkerCount,
 		"telegram_enabled", cfg.TelegramEnabled(),
 		"llm_enabled", cfg.LLMEnabled(),
 		"ml_configured", cfg.MLServiceURL != "",
@@ -38,10 +41,15 @@ func main() {
 	}
 	defer pool.Close()
 
+	store := postgres.NewStore(pool)
+	ingestSvc := ingestion.NewService(store)
+	queue := ingestion.NewQueue(cfg.QueueCapacity, cfg.WorkerCount, ingestSvc, log)
+
 	router := httpapi.NewRouter(httpapi.Dependencies{
-		Config: cfg,
-		Log:    log,
-		DB:     pool,
+		Config:       cfg,
+		Log:          log,
+		DB:           pool,
+		FlowEnqueuer: queue,
 	})
 
 	srv := &http.Server{
@@ -65,11 +73,16 @@ func main() {
 	sig := <-stop
 	log.Info("shutdown_signal", "signal", sig.String())
 
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
-	defer shutdownCancel()
-	if err := srv.Shutdown(shutdownCtx); err != nil {
-		log.Error("shutdown_failed", "error", err.Error())
-		os.Exit(1)
+	// Stop HTTP first so no new 202 accepts race with queue close, then give the
+	// ingestion queue its own full shutdown budget to drain already-accepted jobs.
+	httpCtx, httpCancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
+	if err := srv.Shutdown(httpCtx); err != nil {
+		log.Error("http_shutdown_failed", "error", err.Error())
 	}
+	httpCancel()
+
+	queueCtx, queueCancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
+	queue.Shutdown(queueCtx)
+	queueCancel()
 	log.Info("shutdown_complete")
 }
