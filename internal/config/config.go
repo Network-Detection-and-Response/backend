@@ -26,6 +26,8 @@ type Config struct {
 	MaxFlowsPerBatch      int
 	QueueCapacity         int
 	WorkerCount           int
+	PersistMaxAttempts    int
+	PersistRetryBaseDelay time.Duration
 	TelegramBotToken      string
 	TelegramChatID        string
 	LLMAPIKey             string
@@ -56,6 +58,8 @@ func Load() (Config, error) {
 		MaxFlowsPerBatch:      getInt("MAX_FLOWS_PER_BATCH", 500),
 		QueueCapacity:         getInt("QUEUE_CAPACITY", 100),
 		WorkerCount:           getInt("WORKER_COUNT", 2),
+		PersistMaxAttempts:    getInt("PERSIST_MAX_ATTEMPTS", 3),
+		PersistRetryBaseDelay: getDuration("PERSIST_RETRY_BASE_DELAY", 100*time.Millisecond),
 		TelegramBotToken:      os.Getenv("TELEGRAM_BOT_TOKEN"),
 		TelegramChatID:        os.Getenv("TELEGRAM_CHAT_ID"),
 		LLMAPIKey:             os.Getenv("LLM_API_KEY"),
@@ -105,6 +109,12 @@ func (c Config) validate() error {
 	}
 	if c.WorkerCount <= 0 {
 		return fmt.Errorf("WORKER_COUNT must be positive")
+	}
+	if c.PersistMaxAttempts <= 0 {
+		return fmt.Errorf("PERSIST_MAX_ATTEMPTS must be positive")
+	}
+	if c.PersistRetryBaseDelay <= 0 {
+		return fmt.Errorf("PERSIST_RETRY_BASE_DELAY must be positive")
 	}
 	return nil
 }

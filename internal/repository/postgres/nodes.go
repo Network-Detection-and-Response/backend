@@ -8,7 +8,8 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// UpsertNode inserts a node or refreshes last_seen / ip when it already exists.
+// UpsertNode inserts a node or merges observation windows when it already exists.
+// first_seen shrinks via LEAST; last_seen grows via GREATEST.
 func (s *Store) UpsertNode(ctx context.Context, tx pgx.Tx, node domain.Node) error {
 	const q = `
 INSERT INTO network_nodes (
@@ -16,6 +17,7 @@ INSERT INTO network_nodes (
 ) VALUES ($1,$2,$3,COALESCE(NULLIF($4,''),'unknown'),$5,$6,$7,now())
 ON CONFLICT (id) DO UPDATE SET
     ip_address = EXCLUDED.ip_address,
+    first_seen = LEAST(network_nodes.first_seen, EXCLUDED.first_seen),
     last_seen = GREATEST(network_nodes.last_seen, EXCLUDED.last_seen),
     updated_at = now()
 `

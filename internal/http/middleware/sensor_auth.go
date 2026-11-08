@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"crypto/sha256"
 	"crypto/subtle"
 	"strings"
 
@@ -11,15 +12,18 @@ import (
 const sensorAPIKeyHeader = "X-Sensor-API-Key"
 
 // SensorAPIKey rejects requests without a valid sensor API key.
-// Comparison uses constant-time equality when key lengths match.
+// Keys are compared via SHA-256 digests so ConstantTimeCompare always runs
+// over equal-length inputs regardless of the provided key length.
 func SensorAPIKey(expected string) gin.HandlerFunc {
+	expectedDigest := sha256.Sum256([]byte(expected))
 	return func(c *gin.Context) {
 		provided := strings.TrimSpace(c.GetHeader(sensorAPIKeyHeader))
 		if provided == "" {
 			response.WriteUnauthorized(c, "missing X-Sensor-API-Key header")
 			return
 		}
-		if subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) != 1 {
+		providedDigest := sha256.Sum256([]byte(provided))
+		if subtle.ConstantTimeCompare(providedDigest[:], expectedDigest[:]) != 1 {
 			response.WriteUnauthorized(c, "invalid sensor API key")
 			return
 		}

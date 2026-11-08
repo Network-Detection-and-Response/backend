@@ -44,6 +44,12 @@ func TestLoadOptionalServicesDoNotBlock(t *testing.T) {
 	if cfg.AttackThreshold != 0.60 {
 		t.Fatalf("default ATTACK_THRESHOLD = %v, want 0.60", cfg.AttackThreshold)
 	}
+	if cfg.PersistMaxAttempts != 3 {
+		t.Fatalf("default PERSIST_MAX_ATTEMPTS = %d, want 3", cfg.PersistMaxAttempts)
+	}
+	if cfg.PersistRetryBaseDelay.String() != "100ms" {
+		t.Fatalf("default PERSIST_RETRY_BASE_DELAY = %s, want 100ms", cfg.PersistRetryBaseDelay)
+	}
 }
 
 func TestLoadRejectsInvalidThreshold(t *testing.T) {

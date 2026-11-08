@@ -58,6 +58,20 @@ INSERT INTO incidents (
 	return nil
 }
 
+// HasIncidentForFlowID reports whether an incident already exists for the flow.
+// Used to avoid duplicate incidents if scoring is re-entered for the same flow.
+func (s *Store) HasIncidentForFlowID(ctx context.Context, flowID uuid.UUID) (bool, error) {
+	var exists bool
+	err := s.pool.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM incidents WHERE flow_id = $1)`,
+		flowID,
+	).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("has incident for flow: %w", err)
+	}
+	return exists, nil
+}
+
 // GetIncidentByID returns one incident or pgx.ErrNoRows.
 func (s *Store) GetIncidentByID(ctx context.Context, id uuid.UUID) (domain.Incident, error) {
 	const q = `

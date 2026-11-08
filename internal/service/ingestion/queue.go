@@ -2,9 +2,11 @@ package ingestion
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // Processor persists an accepted batch. Defined as an interface for tests.
@@ -12,20 +14,50 @@ type Processor interface {
 	ProcessBatch(ctx context.Context, job BatchJob) error
 }
 
+// RetryPolicy bounds persistence retries for a single accepted batch.
+// Retries run inside the worker that owns the job so one failing batch
+// cannot stall other workers. The in-memory queue does not survive process
+// crashes; retries do not provide durable delivery guarantees.
+type RetryPolicy struct {
+	MaxAttempts int           // inclusive; must be >= 1 (default 3)
+	BaseDelay   time.Duration // exponential base: BaseDelay * 2^(attempt-1) (default 100ms)
+}
+
+// DefaultRetryPolicy returns the production defaults.
+func DefaultRetryPolicy() RetryPolicy {
+	return RetryPolicy{MaxAttempts: 3, BaseDelay: 100 * time.Millisecond}
+}
+
+func (r RetryPolicy) normalized() RetryPolicy {
+	if r.MaxAttempts < 1 {
+		r.MaxAttempts = 3
+	}
+	if r.BaseDelay <= 0 {
+		r.BaseDelay = 100 * time.Millisecond
+	}
+	return r
+}
+
 // Queue is a bounded in-memory work queue with a fixed worker pool.
 // It does not survive process restarts; accepted-but-unprocessed jobs are lost.
 type Queue struct {
-	mu           sync.RWMutex
-	ch           chan BatchJob
-	closed       bool
-	log          *slog.Logger
-	processor    Processor
-	wg           sync.WaitGroup
-	persistFails atomic.Int64
+	mu            sync.RWMutex
+	ch            chan BatchJob
+	closed        bool
+	log           *slog.Logger
+	processor     Processor
+	retry         RetryPolicy
+	wg            sync.WaitGroup
+	processCtx    context.Context
+	processCancel context.CancelFunc
+	persistFails  atomic.Int64
+	abandoned     atomic.Int64
 }
 
 // NewQueue creates a queue and starts workers. Call Shutdown on exit.
-func NewQueue(capacity int, workerCount int, processor Processor, log *slog.Logger) *Queue {
+// Shutdown always waits until every worker has stopped before returning, so
+// callers may close shared resources (e.g. the DB pool) safely afterwards.
+func NewQueue(capacity int, workerCount int, retry RetryPolicy, processor Processor, log *slog.Logger) *Queue {
 	if capacity < 1 {
 		capacity = 1
 	}
@@ -35,10 +67,14 @@ func NewQueue(capacity int, workerCount int, processor Processor, log *slog.Logg
 	if log == nil {
 		log = slog.Default()
 	}
+	ctx, cancel := context.WithCancel(context.Background())
 	q := &Queue{
-		ch:        make(chan BatchJob, capacity),
-		log:       log,
-		processor: processor,
+		ch:            make(chan BatchJob, capacity),
+		log:           log,
+		processor:     processor,
+		retry:         retry.normalized(),
+		processCtx:    ctx,
+		processCancel: cancel,
 	}
 	for i := 0; i < workerCount; i++ {
 		q.wg.Add(1)
@@ -64,9 +100,15 @@ func (q *Queue) TryEnqueue(job BatchJob) bool {
 	}
 }
 
-// PersistFailures returns how many batches failed during persistence (diagnostics).
+// PersistFailures returns how many batches exhausted all persistence attempts.
 func (q *Queue) PersistFailures() int64 {
 	return q.persistFails.Load()
+}
+
+// AbandonedBatches returns how many accepted batches were dropped because
+// shutdown canceled in-flight work or drained the channel after a timeout.
+func (q *Queue) AbandonedBatches() int64 {
+	return q.abandoned.Load()
 }
 
 // Len returns the current number of queued (not yet taken by workers) jobs.
@@ -80,9 +122,10 @@ func (q *Queue) Cap() int {
 }
 
 // Shutdown stops accepting new jobs, closes the channel, and waits for workers
-// to finish draining already-accepted jobs (including in-flight ProcessBatch).
-// If ctx expires before drain completes, remaining accepted jobs may be lost —
-// callers should allocate a dedicated shutdown budget after HTTP shutdown.
+// to finish. Already-accepted jobs are processed until ctx expires; then
+// in-flight ProcessBatch contexts are canceled, remaining buffered jobs are
+// abandoned while draining, and Shutdown blocks until every worker exits.
+// Callers must not release shared resources (DB pool) until Shutdown returns.
 func (q *Queue) Shutdown(ctx context.Context) {
 	q.mu.Lock()
 	if !q.closed {
@@ -100,10 +143,17 @@ func (q *Queue) Shutdown(ctx context.Context) {
 	select {
 	case <-done:
 		q.log.Info("ingestion_queue_stopped")
+		return
 	case <-ctx.Done():
 		q.log.Error("ingestion_queue_shutdown_timeout",
-			"error", "accepted batches may be lost; increase SHUTDOWN_TIMEOUT",
+			"error", "canceling in-flight persistence; remaining accepted batches will be abandoned",
 			"queued_remaining", len(q.ch),
+		)
+		q.processCancel()
+		<-done
+		q.log.Info("ingestion_queue_stopped_after_cancel",
+			"persist_failures", q.PersistFailures(),
+			"abandoned_batches", q.AbandonedBatches(),
 		)
 	}
 }
@@ -111,23 +161,104 @@ func (q *Queue) Shutdown(ctx context.Context) {
 func (q *Queue) worker(id int) {
 	defer q.wg.Done()
 	for job := range q.ch {
-		ctx := context.Background()
-		if err := q.processor.ProcessBatch(ctx, job); err != nil {
-			q.persistFails.Add(1)
-			q.log.Error("batch_persist_failed",
+		if q.processCtx.Err() != nil {
+			q.abandoned.Add(1)
+			q.log.Error("batch_abandoned_on_shutdown",
 				"worker", id,
 				"batch_id", job.BatchID.String(),
 				"sensor_id", job.SensorID,
 				"flows", len(job.Flows),
-				"error", err.Error(),
 			)
 			continue
 		}
-		q.log.Info("batch_persisted",
+		q.processWithRetry(id, job)
+	}
+}
+
+func (q *Queue) processWithRetry(id int, job BatchJob) {
+	var lastErr error
+	for attempt := 1; attempt <= q.retry.MaxAttempts; attempt++ {
+		if q.processCtx.Err() != nil {
+			q.abandoned.Add(1)
+			q.log.Error("batch_abandoned_on_shutdown",
+				"worker", id,
+				"batch_id", job.BatchID.String(),
+				"sensor_id", job.SensorID,
+				"attempt", attempt,
+				"flows", len(job.Flows),
+			)
+			return
+		}
+
+		lastErr = q.processor.ProcessBatch(q.processCtx, job)
+		if lastErr == nil {
+			q.log.Info("batch_persisted",
+				"worker", id,
+				"batch_id", job.BatchID.String(),
+				"sensor_id", job.SensorID,
+				"attempt", attempt,
+				"flows", len(job.Flows),
+			)
+			return
+		}
+
+		// Shutdown cancel is not a permanent persist failure.
+		if errors.Is(lastErr, context.Canceled) || errors.Is(lastErr, context.DeadlineExceeded) || q.processCtx.Err() != nil {
+			q.abandoned.Add(1)
+			q.log.Error("batch_abandoned_on_shutdown",
+				"worker", id,
+				"batch_id", job.BatchID.String(),
+				"sensor_id", job.SensorID,
+				"attempt", attempt,
+				"flows", len(job.Flows),
+				"error", lastErr.Error(),
+			)
+			return
+		}
+
+		q.log.Error("batch_persist_attempt_failed",
 			"worker", id,
 			"batch_id", job.BatchID.String(),
 			"sensor_id", job.SensorID,
+			"attempt", attempt,
+			"max_attempts", q.retry.MaxAttempts,
 			"flows", len(job.Flows),
+			"error", lastErr.Error(),
 		)
+
+		if attempt == q.retry.MaxAttempts {
+			break
+		}
+
+		delay := q.retry.BaseDelay * time.Duration(1<<(attempt-1))
+		timer := time.NewTimer(delay)
+		select {
+		case <-timer.C:
+		case <-q.processCtx.Done():
+			timer.Stop()
+			q.abandoned.Add(1)
+			q.log.Error("batch_abandoned_on_shutdown",
+				"worker", id,
+				"batch_id", job.BatchID.String(),
+				"sensor_id", job.SensorID,
+				"attempt", attempt,
+				"flows", len(job.Flows),
+			)
+			return
+		}
 	}
+
+	q.persistFails.Add(1)
+	errMsg := "unknown"
+	if lastErr != nil {
+		errMsg = lastErr.Error()
+	}
+	q.log.Error("batch_persist_exhausted",
+		"worker", id,
+		"batch_id", job.BatchID.String(),
+		"sensor_id", job.SensorID,
+		"attempts", q.retry.MaxAttempts,
+		"flows", len(job.Flows),
+		"error", errMsg,
+	)
 }

@@ -3,6 +3,7 @@ package postgres_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/netip"
 	"os"
 	"os/exec"
@@ -169,6 +170,69 @@ func TestMigrationsAndRepositories(t *testing.T) {
 	if !found {
 		t.Fatal("edge not found after upsert")
 	}
+
+	// UpsertNode merges observation windows: older first_seen, newer last_seen.
+	t.Run("UpsertNodeSeenTimestamps", func(t *testing.T) {
+		// Unique per run so leftover rows from prior integration runs cannot affect LEAST.
+		u := uuid.New()
+		mac := fmt.Sprintf("%02X:%02X:%02X:%02X:%02X:%02X", u[0], u[1], u[2], u[3], u[4], u[5])
+		ip := netip.AddrFrom4([4]byte{10, byte(u[6]), byte(u[7]), byte(u[8])})
+		nodeID := domain.MakeNodeID(&mac, ip)
+		mid := now.Add(time.Hour)
+		early := now.Add(-2 * time.Hour)
+		late := now.Add(3 * time.Hour)
+
+		err := store.WithinTx(ctx, func(tx pgx.Tx) error {
+			return store.UpsertNode(ctx, tx, domain.Node{
+				ID: nodeID, MACAddress: &mac, IPAddress: ip,
+				FirstSeen: mid, LastSeen: mid,
+			})
+		})
+		if err != nil {
+			t.Fatalf("initial upsert: %v", err)
+		}
+
+		err = store.WithinTx(ctx, func(tx pgx.Tx) error {
+			return store.UpsertNode(ctx, tx, domain.Node{
+				ID: nodeID, MACAddress: &mac, IPAddress: ip,
+				FirstSeen: early, LastSeen: early,
+			})
+		})
+		if err != nil {
+			t.Fatalf("older observation upsert: %v", err)
+		}
+
+		err = store.WithinTx(ctx, func(tx pgx.Tx) error {
+			return store.UpsertNode(ctx, tx, domain.Node{
+				ID: nodeID, MACAddress: &mac, IPAddress: ip,
+				FirstSeen: late, LastSeen: late,
+			})
+		})
+		if err != nil {
+			t.Fatalf("newer observation upsert: %v", err)
+		}
+
+		nodes, err := store.ListNodes(ctx)
+		if err != nil {
+			t.Fatalf("ListNodes: %v", err)
+		}
+		var got *domain.Node
+		for i := range nodes {
+			if nodes[i].ID == nodeID {
+				got = &nodes[i]
+				break
+			}
+		}
+		if got == nil {
+			t.Fatalf("node %s not found", nodeID)
+		}
+		if !got.FirstSeen.Equal(early) {
+			t.Fatalf("first_seen=%v, want %v (LEAST)", got.FirstSeen.UTC(), early.UTC())
+		}
+		if !got.LastSeen.Equal(late) {
+			t.Fatalf("last_seen=%v, want %v (GREATEST)", got.LastSeen.UTC(), late.UTC())
+		}
+	})
 
 	incID := uuid.New()
 	fid := flowID

@@ -7,9 +7,12 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
+	"github.com/Network-Detection-and-Response/backend/internal/agent"
 	"github.com/Network-Detection-and-Response/backend/internal/config"
 	httpapi "github.com/Network-Detection-and-Response/backend/internal/http"
+	"github.com/Network-Detection-and-Response/backend/internal/integrations/ml"
 	"github.com/Network-Detection-and-Response/backend/internal/observability"
 	"github.com/Network-Detection-and-Response/backend/internal/repository/postgres"
 	"github.com/Network-Detection-and-Response/backend/internal/service/ingestion"
@@ -28,9 +31,12 @@ func main() {
 		"http_addr", cfg.HTTPAddr,
 		"queue_capacity", cfg.QueueCapacity,
 		"worker_count", cfg.WorkerCount,
+		"persist_max_attempts", cfg.PersistMaxAttempts,
+		"persist_retry_base_delay", cfg.PersistRetryBaseDelay.String(),
 		"telegram_enabled", cfg.TelegramEnabled(),
 		"llm_enabled", cfg.LLMEnabled(),
 		"ml_configured", cfg.MLServiceURL != "",
+		"attack_threshold", cfg.AttackThreshold,
 	)
 
 	ctx := context.Background()
@@ -42,8 +48,37 @@ func main() {
 	defer pool.Close()
 
 	store := postgres.NewStore(pool)
-	ingestSvc := ingestion.NewService(store)
-	queue := ingestion.NewQueue(cfg.QueueCapacity, cfg.WorkerCount, ingestSvc, log)
+
+	mlClient := ml.NewClient(cfg.MLServiceURL, cfg.MLTimeout)
+	var explainer agent.Explainer = agent.TemplateExplainer{}
+	if cfg.LLMEnabled() {
+		if llm := agent.NewHTTPLLMClient(cfg.LLMBaseURL, cfg.LLMAPIKey, 5*time.Second); llm != nil {
+			explainer = agent.OptionalLLMExplainer{Enabled: true, Inner: llm}
+			log.Info("llm_explainer_enabled")
+		}
+	}
+	decisionAgent := agent.New(agent.Config{
+		AttackThreshold:       cfg.AttackThreshold,
+		DDoSCriticalThreshold: cfg.DDoSCriticalThreshold,
+	}, explainer)
+
+	ingestSvc := ingestion.NewService(store, ingestion.Options{
+		Predictor:     mlClient,
+		DecisionStore: store,
+		Agent:         decisionAgent,
+		Log:           log,
+		HistoryWindow: cfg.AttackWindow,
+	})
+	queue := ingestion.NewQueue(
+		cfg.QueueCapacity,
+		cfg.WorkerCount,
+		ingestion.RetryPolicy{
+			MaxAttempts: cfg.PersistMaxAttempts,
+			BaseDelay:   cfg.PersistRetryBaseDelay,
+		},
+		ingestSvc,
+		log,
+	)
 
 	router := httpapi.NewRouter(httpapi.Dependencies{
 		Config:       cfg,

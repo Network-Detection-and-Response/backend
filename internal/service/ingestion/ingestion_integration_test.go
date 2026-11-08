@@ -44,8 +44,8 @@ func TestIngestionPersistsFlowsNodesEdges(t *testing.T) {
 	}
 
 	store := postgres.NewStore(pool)
-	svc := ingestion.NewService(store)
-	q := ingestion.NewQueue(8, 1, svc, slog.Default())
+	svc := ingestion.NewService(store, ingestion.Options{})
+	q := ingestion.NewQueue(8, 1, ingestion.DefaultRetryPolicy(), svc, slog.Default())
 	defer q.Shutdown(context.Background())
 
 	raw := []byte(`{

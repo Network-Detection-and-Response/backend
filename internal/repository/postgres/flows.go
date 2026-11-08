@@ -3,6 +3,8 @@ package postgres
 import (
 	"context"
 	"fmt"
+	"net/netip"
+	"time"
 
 	"github.com/Network-Detection-and-Response/backend/internal/domain"
 	"github.com/google/uuid"
@@ -89,5 +91,16 @@ func (s *Store) CountFlows(ctx context.Context) (int64, error) {
 func (s *Store) CountFlowsByBatchID(ctx context.Context, batchID uuid.UUID) (int64, error) {
 	var n int64
 	err := s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM network_flows WHERE batch_id = $1`, batchID).Scan(&n)
+	return n, err
+}
+
+// CountRecentFlowsBySrcIP counts flows from srcIP with observed_at >= since (UTC).
+// Used as a simple historical aggregate for the decision agent context.
+func (s *Store) CountRecentFlowsBySrcIP(ctx context.Context, srcIP netip.Addr, since time.Time) (int64, error) {
+	var n int64
+	err := s.pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM network_flows WHERE src_ip = $1 AND observed_at >= $2`,
+		srcIP, since.UTC(),
+	).Scan(&n)
 	return n, err
 }
