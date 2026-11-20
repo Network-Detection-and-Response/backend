@@ -46,17 +46,24 @@ type Service struct {
 	predictor     Predictor
 	decisions     DecisionStore
 	agent         *agent.Agent
+	notifier      IncidentNotifier
 	log           *slog.Logger
 	historyWindow time.Duration
 	mlFailures    atomic.Int64
 	incidentFails atomic.Int64
 }
 
-// Options configures optional ML / decision wiring.
+// IncidentNotifier receives newly created incidents without blocking the pipeline.
+type IncidentNotifier interface {
+	Enqueue(inc domain.Incident)
+}
+
+// Options configures optional ML / decision / notification wiring.
 type Options struct {
 	Predictor     Predictor
 	DecisionStore DecisionStore
 	Agent         *agent.Agent
+	Notifier      IncidentNotifier
 	Log           *slog.Logger
 	HistoryWindow time.Duration
 }
@@ -76,6 +83,7 @@ func NewService(store BatchStore, opts Options) *Service {
 		predictor:     opts.Predictor,
 		decisions:     opts.DecisionStore,
 		agent:         opts.Agent,
+		notifier:      opts.Notifier,
 		log:           log,
 		historyWindow: window,
 	}
@@ -215,6 +223,9 @@ func (s *Service) scoreAndDecide(ctx context.Context, job BatchJob) {
 			"severity", inc.Severity,
 			"status", inc.Status,
 		)
+		if s.notifier != nil {
+			s.notifier.Enqueue(inc)
+		}
 	}
 }
 

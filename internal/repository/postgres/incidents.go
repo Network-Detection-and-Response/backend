@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/Network-Detection-and-Response/backend/internal/domain"
@@ -11,6 +12,16 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
+
+// IncidentListFilter holds validated list query parameters.
+type IncidentListFilter struct {
+	Page     int
+	PageSize int
+	Severity *string
+	Status   *string
+	Since    *time.Time
+	Until    *time.Time
+}
 
 type execer interface {
 	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
@@ -94,6 +105,114 @@ WHERE id = $1`
 	inc.SrcMAC = srcMAC
 	inc.DstMAC = dstMAC
 	return inc, nil
+}
+
+// ListIncidents returns a page of incidents and the total matching count.
+func (s *Store) ListIncidents(ctx context.Context, f IncidentListFilter) ([]domain.Incident, int64, error) {
+	if f.Page < 1 {
+		f.Page = 1
+	}
+	if f.PageSize < 1 {
+		f.PageSize = 20
+	}
+	if f.PageSize > 100 {
+		f.PageSize = 100
+	}
+
+	where, args := buildIncidentWhere(f)
+	countQ := `SELECT COUNT(*) FROM incidents` + where
+	var total int64
+	if err := s.pool.QueryRow(ctx, countQ, args...).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count incidents: %w", err)
+	}
+
+	offset := (f.Page - 1) * f.PageSize
+	args = append(args, f.PageSize, offset)
+	listQ := `
+SELECT id, flow_id, created_at, src_ip, src_mac::text, dst_ip, dst_mac::text,
+       attack_class, severity, status, ml_confidence,
+       agent_verdict, recommended_action, context_summary
+FROM incidents` + where + `
+ORDER BY created_at DESC
+LIMIT $` + itoa(len(args)-1) + ` OFFSET $` + itoa(len(args))
+
+	rows, err := s.pool.Query(ctx, listQ, args...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("list incidents: %w", err)
+	}
+	defer rows.Close()
+
+	var out []domain.Incident
+	for rows.Next() {
+		var inc domain.Incident
+		var srcMAC, dstMAC *string
+		if err := rows.Scan(
+			&inc.ID, &inc.FlowID, &inc.CreatedAt, &inc.SrcIP, &srcMAC, &inc.DstIP, &dstMAC,
+			&inc.AttackClass, &inc.Severity, &inc.Status, &inc.MLConfidence,
+			&inc.AgentVerdict, &inc.RecommendedAction, &inc.ContextSummary,
+		); err != nil {
+			return nil, 0, err
+		}
+		inc.SrcMAC = srcMAC
+		inc.DstMAC = dstMAC
+		out = append(out, inc)
+	}
+	if out == nil {
+		out = []domain.Incident{}
+	}
+	return out, total, rows.Err()
+}
+
+// UpdateIncidentStatus sets a new status after transition validation by the caller.
+func (s *Store) UpdateIncidentStatus(ctx context.Context, id uuid.UUID, status string) (domain.Incident, error) {
+	const q = `
+UPDATE incidents SET status = $2
+WHERE id = $1
+RETURNING id, flow_id, created_at, src_ip, src_mac::text, dst_ip, dst_mac::text,
+          attack_class, severity, status, ml_confidence,
+          agent_verdict, recommended_action, context_summary`
+	var inc domain.Incident
+	var srcMAC, dstMAC *string
+	err := s.pool.QueryRow(ctx, q, id, status).Scan(
+		&inc.ID, &inc.FlowID, &inc.CreatedAt, &inc.SrcIP, &srcMAC, &inc.DstIP, &dstMAC,
+		&inc.AttackClass, &inc.Severity, &inc.Status, &inc.MLConfidence,
+		&inc.AgentVerdict, &inc.RecommendedAction, &inc.ContextSummary,
+	)
+	if err != nil {
+		return domain.Incident{}, err
+	}
+	inc.SrcMAC = srcMAC
+	inc.DstMAC = dstMAC
+	return inc, nil
+}
+
+func buildIncidentWhere(f IncidentListFilter) (string, []any) {
+	var parts []string
+	var args []any
+	add := func(expr string, v any) {
+		args = append(args, v)
+		parts = append(parts, fmt.Sprintf(expr, len(args)))
+	}
+	if f.Severity != nil {
+		add("severity = $%d", *f.Severity)
+	}
+	if f.Status != nil {
+		add("status = $%d", *f.Status)
+	}
+	if f.Since != nil {
+		add("created_at >= $%d", f.Since.UTC())
+	}
+	if f.Until != nil {
+		add("created_at <= $%d", f.Until.UTC())
+	}
+	if len(parts) == 0 {
+		return "", args
+	}
+	return " WHERE " + strings.Join(parts, " AND "), args
+}
+
+func itoa(n int) string {
+	return fmt.Sprintf("%d", n)
 }
 
 // ListEnabledWhitelistSchedules returns enabled schedules for the decision agent.

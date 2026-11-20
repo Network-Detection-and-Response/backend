@@ -17,14 +17,15 @@ Backend учебной системы **Network Detection and Response** на Go
 - `POST /api/v1/flows` — приём батчей от сенсора (валидация, API-ключ, очередь, сохранение flows/nodes/edges)
 - ML-клиент (mock-compatible) `POST ${ML_SERVICE_URL}/predict` с таймаутом и валидацией ответа; при сбое ML телеметрия сохраняется, предсказания не выдумываются
 - Decision Agent: детерминированные правила (`Normal`/`PortScan`/`DDoS`/`BruteForce`), whitelist UTC, русские шаблоны; LLM опционален и не меняет class/confidence/severity; повторный скоринг того же flow не создаёт дубликат инцидента
+- API инцидентов: `GET/PATCH /api/v1/incidents` (пагинация, фильтры, переходы статусов)
+- Telegram: опциональная очередь с retry; только HIGH/CRITICAL; сбой Telegram не блокирует ingestion
 - Репозитории для работы с этими таблицами
 - Базовые автотесты и команды сборки/проверки
 
 ## Что планируется дальше
 
-1. API инцидентов, топологии и статистики для панели
-2. Уведомления в Telegram (опционально)
-3. Realtime-события по WebSocket
+1. API топологии и статистики для панели
+2. Realtime-события по WebSocket
 
 ## Стек
 
@@ -94,11 +95,28 @@ curl -s -X POST http://localhost:8080/api/v1/flows \
 
 **Ограничения очереди:** in-memory канал не переживает аварийный перезапуск/kill и не даёт гарантированной доставки. При штатной остановке (SIGINT/SIGTERM) HTTP сначала перестаёт принимать запросы; затем очередь дренирует уже принятые батчи в пределах `SHUTDOWN_TIMEOUT` (отдельный бюджет после остановки HTTP). По истечении бюджета in-flight `ProcessBatch` отменяется, оставшиеся задания помечаются abandoned, и `Shutdown` **всегда** дожидается выхода workers перед возвратом — пул БД закрывается только после этого. Если БД игнорирует отмену контекста, процесс может зависнуть на shutdown (это намеренно безопаснее, чем закрыть pool под активными workers). Ошибки сохранения ретраятся ограниченно (`PERSIST_MAX_ATTEMPTS`, exponential backoff от `PERSIST_RETRY_BASE_DELAY`) внутри worker'а; после исчерпания попыток батч учитывается в `persist_failures` и отбрасывается. Повтор после `202` создаёт новый `batch_id` и дублирует строки — не ретраить успешный accept.
 
+### Инциденты (dashboard)
+
+```bash
+curl -s "http://localhost:8080/api/v1/incidents?page=1&page_size=20&severity=CRITICAL&status=OPEN"
+curl -s "http://localhost:8080/api/v1/incidents/<uuid>"
+curl -s -X PATCH "http://localhost:8080/api/v1/incidents/<uuid>" \
+  -H "Content-Type: application/json" \
+  -d '{"status":"ACKNOWLEDGED"}'
+```
+
+Допустимые PATCH-статусы: `ACKNOWLEDGED`, `RESOLVED`, `FALSE_POSITIVE`.  
+Переходы: `OPEN → ACKNOWLEDGED|RESOLVED|FALSE_POSITIVE`; `ACKNOWLEDGED → RESOLVED|FALSE_POSITIVE`; `RESOLVED`/`FALSE_POSITIVE` терминальны.
+
+### Telegram
+
+Включается только при обоих `TELEGRAM_BOT_TOKEN` и `TELEGRAM_CHAT_ID`. Отправляются только новые инциденты severity `HIGH`/`CRITICAL` (не `FALSE_POSITIVE`). Очередь in-memory: **не переживает перезапуск**, доставка не гарантирована; при переполнении сообщение дропается (счётчик/лог), pipeline не блокируется. Токены в логи не пишутся. Тесты используют mock HTTP, не реальный чат.
+
 Обязательные переменные в `.env`: `DATABASE_URL`, `SENSOR_API_KEY`.  
-Опционально: `ML_SERVICE_URL` (без него flows сохраняются, скоринг пропускается), `ATTACK_THRESHOLD` (по умолчанию `0.60`), `DDOS_CRITICAL_THRESHOLD` (`0.85`), `LLM_API_KEY`/`LLM_BASE_URL` (только текст объяснения).  
-Контракт ML и статус сверки с Python-сервисом: `docs/ML_CONTRACT.md`.  
-Whitelist-расписания интерпретируются в **UTC**; совпадение exact-match может снизить severity и выставить `FALSE_POSITIVE`. Рекомендации advisory only — IP не блокируется.  
-Файл `.env` в git не коммитится. Dashboard API на этом этапе без пользовательской авторизации (учебный стенд, не production-ready).
+Опционально: `ML_SERVICE_URL`, `ATTACK_THRESHOLD` (`0.60`), `DDOS_CRITICAL_THRESHOLD` (`0.85`), Telegram/LLM.  
+Контракт ML: `docs/ML_CONTRACT.md` (реальный Python API пока не подтверждён).  
+Whitelist — **UTC**. Рекомендации advisory only — IP не блокируется.  
+Файл `.env` в git не коммитится. Dashboard API без пользовательской авторизации (учебный стенд).
 
 ## Полезные команды
 

@@ -30,6 +30,11 @@ type Config struct {
 	PersistRetryBaseDelay time.Duration
 	TelegramBotToken      string
 	TelegramChatID        string
+	TelegramAPIBaseURL    string
+	TelegramQueueCapacity int
+	TelegramMaxAttempts   int
+	TelegramRetryBase     time.Duration
+	TelegramHTTPTimeout   time.Duration
 	LLMAPIKey             string
 	LLMBaseURL            string
 	AttackWindow          time.Duration
@@ -62,6 +67,11 @@ func Load() (Config, error) {
 		PersistRetryBaseDelay: getDuration("PERSIST_RETRY_BASE_DELAY", 100*time.Millisecond),
 		TelegramBotToken:      os.Getenv("TELEGRAM_BOT_TOKEN"),
 		TelegramChatID:        os.Getenv("TELEGRAM_CHAT_ID"),
+		TelegramAPIBaseURL:    strings.TrimRight(strings.TrimSpace(getEnv("TELEGRAM_API_BASE_URL", "https://api.telegram.org")), "/"),
+		TelegramQueueCapacity: getInt("TELEGRAM_QUEUE_CAPACITY", 100),
+		TelegramMaxAttempts:   getInt("TELEGRAM_MAX_ATTEMPTS", 3),
+		TelegramRetryBase:     getDuration("TELEGRAM_RETRY_BASE_DELAY", 500*time.Millisecond),
+		TelegramHTTPTimeout:   getDuration("TELEGRAM_HTTP_TIMEOUT", 10*time.Second),
 		LLMAPIKey:             os.Getenv("LLM_API_KEY"),
 		LLMBaseURL:            strings.TrimSpace(os.Getenv("LLM_BASE_URL")),
 		AttackWindow:          getDuration("ATTACK_WINDOW", 15*time.Minute),
@@ -115,6 +125,18 @@ func (c Config) validate() error {
 	}
 	if c.PersistRetryBaseDelay <= 0 {
 		return fmt.Errorf("PERSIST_RETRY_BASE_DELAY must be positive")
+	}
+	if c.TelegramQueueCapacity <= 0 {
+		return fmt.Errorf("TELEGRAM_QUEUE_CAPACITY must be positive")
+	}
+	if c.TelegramMaxAttempts <= 0 {
+		return fmt.Errorf("TELEGRAM_MAX_ATTEMPTS must be positive")
+	}
+	if c.TelegramRetryBase <= 0 {
+		return fmt.Errorf("TELEGRAM_RETRY_BASE_DELAY must be positive")
+	}
+	if c.TelegramHTTPTimeout <= 0 {
+		return fmt.Errorf("TELEGRAM_HTTP_TIMEOUT must be positive")
 	}
 	return nil
 }

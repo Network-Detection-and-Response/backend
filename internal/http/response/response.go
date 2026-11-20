@@ -35,6 +35,8 @@ const (
 	CodeUnauthorized    = "UNAUTHORIZED"
 	CodePayloadTooLarge = "PAYLOAD_TOO_LARGE"
 	CodeQueueFull       = "QUEUE_FULL"
+	CodeNotFound        = "NOT_FOUND"
+	CodeConflict        = "CONFLICT"
 	CodeInternal        = "INTERNAL_ERROR"
 )
 

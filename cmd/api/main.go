@@ -13,8 +13,10 @@ import (
 	"github.com/Network-Detection-and-Response/backend/internal/config"
 	httpapi "github.com/Network-Detection-and-Response/backend/internal/http"
 	"github.com/Network-Detection-and-Response/backend/internal/integrations/ml"
+	"github.com/Network-Detection-and-Response/backend/internal/notifications"
 	"github.com/Network-Detection-and-Response/backend/internal/observability"
 	"github.com/Network-Detection-and-Response/backend/internal/repository/postgres"
+	"github.com/Network-Detection-and-Response/backend/internal/service/incidents"
 	"github.com/Network-Detection-and-Response/backend/internal/service/ingestion"
 )
 
@@ -49,6 +51,26 @@ func main() {
 
 	store := postgres.NewStore(pool)
 
+	var telegramSender notifications.Sender
+	if cfg.TelegramEnabled() {
+		telegramSender = notifications.NewTelegramSender(
+			cfg.TelegramAPIBaseURL,
+			cfg.TelegramBotToken,
+			cfg.TelegramChatID,
+			cfg.TelegramHTTPTimeout,
+		)
+	}
+	notifyQueue := notifications.NewQueue(
+		cfg.TelegramEnabled(),
+		telegramSender,
+		notifications.QueueConfig{
+			Capacity:  cfg.TelegramQueueCapacity,
+			MaxTries:  cfg.TelegramMaxAttempts,
+			BaseDelay: cfg.TelegramRetryBase,
+		},
+		log,
+	)
+
 	mlClient := ml.NewClient(cfg.MLServiceURL, cfg.MLTimeout)
 	var explainer agent.Explainer = agent.TemplateExplainer{}
 	if cfg.LLMEnabled() {
@@ -66,6 +88,7 @@ func main() {
 		Predictor:     mlClient,
 		DecisionStore: store,
 		Agent:         decisionAgent,
+		Notifier:      notifyQueue,
 		Log:           log,
 		HistoryWindow: cfg.AttackWindow,
 	})
@@ -80,11 +103,13 @@ func main() {
 		log,
 	)
 
+	incidentSvc := incidents.NewService(store)
 	router := httpapi.NewRouter(httpapi.Dependencies{
-		Config:       cfg,
-		Log:          log,
-		DB:           pool,
-		FlowEnqueuer: queue,
+		Config:          cfg,
+		Log:             log,
+		DB:              pool,
+		FlowEnqueuer:    queue,
+		IncidentService: incidentSvc,
 	})
 
 	srv := &http.Server{
@@ -108,8 +133,6 @@ func main() {
 	sig := <-stop
 	log.Info("shutdown_signal", "signal", sig.String())
 
-	// Stop HTTP first so no new 202 accepts race with queue close, then give the
-	// ingestion queue its own full shutdown budget to drain already-accepted jobs.
 	httpCtx, httpCancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	if err := srv.Shutdown(httpCtx); err != nil {
 		log.Error("http_shutdown_failed", "error", err.Error())
@@ -119,5 +142,9 @@ func main() {
 	queueCtx, queueCancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	queue.Shutdown(queueCtx)
 	queueCancel()
+
+	notifyCtx, notifyCancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
+	notifyQueue.Shutdown(notifyCtx)
+	notifyCancel()
 	log.Info("shutdown_complete")
 }

@@ -6,18 +6,20 @@ import (
 	"github.com/Network-Detection-and-Response/backend/internal/config"
 	"github.com/Network-Detection-and-Response/backend/internal/http/handlers"
 	"github.com/Network-Detection-and-Response/backend/internal/http/middleware"
+	"github.com/Network-Detection-and-Response/backend/internal/service/incidents"
 	"github.com/gin-gonic/gin"
 )
 
 // Dependencies wired into the HTTP layer.
 type Dependencies struct {
-	Config       config.Config
-	Log          *slog.Logger
-	DB           handlers.DBPinger
-	FlowEnqueuer handlers.FlowEnqueuer
+	Config          config.Config
+	Log             *slog.Logger
+	DB              handlers.DBPinger
+	FlowEnqueuer    handlers.FlowEnqueuer
+	IncidentService *incidents.Service
 }
 
-// NewRouter builds the Gin engine with health and flow ingestion endpoints.
+// NewRouter builds the Gin engine with health, flows and incidents endpoints.
 func NewRouter(deps Dependencies) *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
@@ -38,6 +40,12 @@ func NewRouter(deps Dependencies) *gin.Engine {
 	v1 := r.Group("/api/v1")
 	{
 		v1.POST("/flows", middleware.SensorAPIKey(deps.Config.SensorAPIKey), flows.AcceptBatch)
+		if deps.IncidentService != nil {
+			inc := &handlers.Incidents{Service: deps.IncidentService}
+			v1.GET("/incidents", inc.List)
+			v1.GET("/incidents/:id", inc.Get)
+			v1.PATCH("/incidents/:id", inc.Patch)
+		}
 	}
 
 	return r
