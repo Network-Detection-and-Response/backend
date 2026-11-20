@@ -31,4 +31,5 @@ go.work.sum
 
 .cursor/
 ndr-cursor-backend-kit/
-docs/
+# docs/ is tracked (e.g. docs/ML_CONTRACT.md). Keep local scratch notes out of git via docs/local/ if needed.
+docs/local/

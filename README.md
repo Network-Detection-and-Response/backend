@@ -24,10 +24,12 @@ Backend учебной системы **Network Detection and Response** на Go
 - `GET /ws/stream` — realtime WebSocket (`FLOW_STATS`, `INCIDENT_ALERT`, `TOPOLOGY_UPDATED`); REST остаётся источником начальной загрузки
 - Репозитории для работы с этими таблицами
 - Базовые автотесты и команды сборки/проверки
+- Интеграционный audit (фаза 08): матрица требований, ограничения стенда, открытые вопросы к команде (ниже)
 
 ## Что планируется дальше
 
-1. Интеграционный review / сверка контрактов с командой (Sensor, ML, Frontend)
+1. Согласовать открытые контрактные вопросы с владельцами Sensor / ML / Frontend (раздел ниже)
+2. Опционально: пользовательская авторизация dashboard/WS (только после решения команды)
 
 ## Стек
 
@@ -95,6 +97,8 @@ curl -s -X POST http://localhost:8080/api/v1/flows \
 
 Коды ошибок: `400` (валидация), `401` (ключ), `413` (слишком большой body/батч), `503` (очередь заполнена).
 
+**JSON policy:** неизвестные поля в теле `POST /api/v1/flows` **отклоняются** (`DisallowUnknownFields` → `400 VALIDATION_ERROR`). Лишние ключи в `tcp_flags` тоже запрещены.
+
 **Ограничения очереди:** in-memory канал не переживает аварийный перезапуск/kill и не даёт гарантированной доставки. При штатной остановке (SIGINT/SIGTERM) HTTP сначала перестаёт принимать запросы; затем очередь дренирует уже принятые батчи в пределах `SHUTDOWN_TIMEOUT` (отдельный бюджет после остановки HTTP). По истечении бюджета in-flight `ProcessBatch` отменяется, оставшиеся задания помечаются abandoned, и `Shutdown` **всегда** дожидается выхода workers перед возвратом — пул БД закрывается только после этого. Если БД игнорирует отмену контекста, процесс может зависнуть на shutdown (это намеренно безопаснее, чем закрыть pool под активными workers). Ошибки сохранения ретраятся ограниченно (`PERSIST_MAX_ATTEMPTS`, exponential backoff от `PERSIST_RETRY_BASE_DELAY`) внутри worker'а; после исчерпания попыток батч учитывается в `persist_failures` и отбрасывается. Повтор после `202` создаёт новый `batch_id` и дублирует строки — не ретраить успешный accept.
 
 ### Инциденты (dashboard)
@@ -159,4 +163,55 @@ Whitelist — **UTC**. Рекомендации advisory only — IP не бло
 | `make migrate-up` | применить миграции |
 | `make docker-up` | поднять Compose |
 
-Миграции нужно запускать отдельно — при старте API схема сама не создаётся.
+Миграции нужно запускать отдельно — при старте API и в Docker Compose схема сама **не** создаётся (`make migrate-up` после `docker compose up -d postgres`).
+
+## Демо-сценарий (acceptance)
+
+1. `cp .env.example .env` → задать `SENSOR_API_KEY`, при необходимости `ML_SERVICE_URL`.
+2. Поднять БД: `docker compose up -d postgres` (нужен запущенный Docker Desktop).
+3. `make migrate-up` → `make run` (или `docker compose up --build -d` после миграций).
+4. `curl` `/healthz` и `/readyz` → `200`.
+5. Отправить нормальный батч на `POST /api/v1/flows` → `202`; проверить `GET /api/v1/topology` (nodes/edges) и `GET /api/v1/stats/overview?period=24h`.
+6. С mock ML (высокий `PortScan`/`DDoS`): убедиться, что появляется инцидент, при желании событие на `GET /ws/stream`, при настроенном Telegram — сообщение только для HIGH/CRITICAL.
+7. Остановить ML / указать неверный URL: ingestion продолжает сохранять flows, инциденты из «пустого» ML не создаются.
+8. Сбой Telegram (неверный token/chat или mock 500): API и очередь ingestion остаются доступны.
+
+## Запуск для одногруппника
+
+```bash
+git clone <repo> && cd backend
+cp .env.example .env   # SENSOR_API_KEY, DATABASE_URL
+# Docker Desktop должен быть запущен
+docker compose up -d postgres
+make migrate-up
+make test
+make run
+```
+
+Compose `backend` собирает API, но **не** накатывает goose. Локально API обычно удобнее через `make run` к `localhost:5432`.
+
+## Открытые вопросы к команде (контракты)
+
+**Sensor**
+- Timestamp относится к батчу целиком или к каждому flow?
+- Гарантирует ли сенсор unique flow IDs, или ID всегда выдаёт backend?
+- Допустимы ли `src_port`/`dst_port` = 0 для не-TCP/UDP?
+- Точное имя заголовка ключа и переменной конфигурации на стороне сенсора?
+
+**ML**
+- Совпадает ли live `POST /predict` с `API_CONTRACTS.md` / `docs/ML_CONTRACT.md` (batch + `flow_id` + 4 класса)?
+- Какой базовый URL и таймауты на стенде команды?
+
+**Frontend**
+- Устраивает ли открытый dashboard/WS без user auth на учебном стенде?
+- Ожидаемые `data` для `FLOW_STATS` / `TOPOLOGY_UPDATED` (сейчас зафиксированы в README)?
+- `incident_id` как UUID (как в REST), а не display-id вида `INC-883`?
+
+## Известные ограничения стенда
+
+- Dashboard REST и `/ws/stream` без пользовательской авторизации; Origin ≠ auth.
+- In-memory очереди ingestion/Telegram/WS не переживают restart; при полном WS-буфере события клиенту могут теряться.
+- Одна инстанция backend; горизонтальный fan-out WS без брокера не поддерживается.
+- Реальная блокировка IP не выполняется; `recommended_action` advisory only.
+- `go test -race` требует cgo + gcc (на Windows без MinGW может быть недоступен).
+- Интеграционные тесты с PostgreSQL пропускаются (`Skip`), если БД/goose недоступны.

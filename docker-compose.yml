@@ -15,6 +15,9 @@ services:
       timeout: 5s
       retries: 10
 
+  # Migrations are NOT applied by this service. After first postgres start:
+  #   make migrate-up
+  # (or goose against DATABASE_URL pointing at localhost:5432).
   backend:
     build: .
     depends_on:
@@ -25,7 +28,13 @@ services:
       DATABASE_URL: postgres://ndr:ndr@postgres:5432/ndr?sslmode=disable
       SENSOR_API_KEY: ${SENSOR_API_KEY:-change-me-sensor-key}
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:5173,http://localhost:3000}
-      ML_SERVICE_URL: ${ML_SERVICE_URL:-http://host.docker.internal:8000}
+      ML_SERVICE_URL: ${ML_SERVICE_URL:-}
+      ATTACK_THRESHOLD: ${ATTACK_THRESHOLD:-0.60}
+      DDOS_CRITICAL_THRESHOLD: ${DDOS_CRITICAL_THRESHOLD:-0.85}
+      ATTACK_WINDOW: ${ATTACK_WINDOW:-15m}
+      QUEUE_CAPACITY: ${QUEUE_CAPACITY:-100}
+      WORKER_COUNT: ${WORKER_COUNT:-2}
+      WS_CLIENT_BUFFER: ${WS_CLIENT_BUFFER:-64}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
