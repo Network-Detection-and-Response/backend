@@ -31,3 +31,4 @@ go.work.sum
 
 .cursor/
 ndr-cursor-backend-kit/
+docs/

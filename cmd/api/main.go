@@ -18,6 +18,8 @@ import (
 	"github.com/Network-Detection-and-Response/backend/internal/repository/postgres"
 	"github.com/Network-Detection-and-Response/backend/internal/service/incidents"
 	"github.com/Network-Detection-and-Response/backend/internal/service/ingestion"
+	"github.com/Network-Detection-and-Response/backend/internal/service/stats"
+	"github.com/Network-Detection-and-Response/backend/internal/service/topology"
 )
 
 func main() {
@@ -104,12 +106,16 @@ func main() {
 	)
 
 	incidentSvc := incidents.NewService(store)
+	topologySvc := topology.NewService(store, cfg.AttackWindow)
+	statsSvc := stats.NewService(store)
 	router := httpapi.NewRouter(httpapi.Dependencies{
 		Config:          cfg,
 		Log:             log,
 		DB:              pool,
 		FlowEnqueuer:    queue,
 		IncidentService: incidentSvc,
+		TopologyService: topologySvc,
+		StatsService:    statsSvc,
 	})
 
 	srv := &http.Server{

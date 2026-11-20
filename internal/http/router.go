@@ -7,6 +7,8 @@ import (
 	"github.com/Network-Detection-and-Response/backend/internal/http/handlers"
 	"github.com/Network-Detection-and-Response/backend/internal/http/middleware"
 	"github.com/Network-Detection-and-Response/backend/internal/service/incidents"
+	"github.com/Network-Detection-and-Response/backend/internal/service/stats"
+	"github.com/Network-Detection-and-Response/backend/internal/service/topology"
 	"github.com/gin-gonic/gin"
 )
 
@@ -17,9 +19,11 @@ type Dependencies struct {
 	DB              handlers.DBPinger
 	FlowEnqueuer    handlers.FlowEnqueuer
 	IncidentService *incidents.Service
+	TopologyService *topology.Service
+	StatsService    *stats.Service
 }
 
-// NewRouter builds the Gin engine with health, flows and incidents endpoints.
+// NewRouter builds the Gin engine with health, flows, incidents, topology and stats.
 func NewRouter(deps Dependencies) *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
@@ -45,6 +49,14 @@ func NewRouter(deps Dependencies) *gin.Engine {
 			v1.GET("/incidents", inc.List)
 			v1.GET("/incidents/:id", inc.Get)
 			v1.PATCH("/incidents/:id", inc.Patch)
+		}
+		if deps.TopologyService != nil {
+			topo := &handlers.Topology{Service: deps.TopologyService}
+			v1.GET("/topology", topo.Get)
+		}
+		if deps.StatsService != nil {
+			st := &handlers.Stats{Service: deps.StatsService}
+			v1.GET("/stats/overview", st.Overview)
 		}
 	}
 

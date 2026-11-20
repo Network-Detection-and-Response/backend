@@ -19,13 +19,14 @@ Backend учебной системы **Network Detection and Response** на Go
 - Decision Agent: детерминированные правила (`Normal`/`PortScan`/`DDoS`/`BruteForce`), whitelist UTC, русские шаблоны; LLM опционален и не меняет class/confidence/severity; повторный скоринг того же flow не создаёт дубликат инцидента
 - API инцидентов: `GET/PATCH /api/v1/incidents` (пагинация, фильтры, переходы статусов)
 - Telegram: опциональная очередь с retry; только HIGH/CRITICAL; сбой Telegram не блокирует ingestion
+- `GET /api/v1/topology` — наблюдаемый граф связей (не физическая схема); `is_compromised` / `is_under_attack` из активных инцидентов за `ATTACK_WINDOW`
+- `GET /api/v1/stats/overview?period=24h` — агрегаты flows/bytes/packets и инцидентов
 - Репозитории для работы с этими таблицами
 - Базовые автотесты и команды сборки/проверки
 
 ## Что планируется дальше
 
-1. API топологии и статистики для панели
-2. Realtime-события по WebSocket
+1. Realtime-события по WebSocket
 
 ## Стек
 
@@ -107,6 +108,18 @@ curl -s -X PATCH "http://localhost:8080/api/v1/incidents/<uuid>" \
 
 Допустимые PATCH-статусы: `ACKNOWLEDGED`, `RESOLVED`, `FALSE_POSITIVE`.  
 Переходы: `OPEN → ACKNOWLEDGED|RESOLVED|FALSE_POSITIVE`; `ACKNOWLEDGED → RESOLVED|FALSE_POSITIVE`; `RESOLVED`/`FALSE_POSITIVE` терминальны.
+
+### Топология и статистика
+
+```bash
+curl -s http://localhost:8080/api/v1/topology
+curl -s "http://localhost:8080/api/v1/stats/overview?period=24h"
+```
+
+Топология — **наблюдаемые** коммуникации sensor→backend (IP/MAC), не гарантированная L2/L3 схема сети.  
+Флаги атаки считаются на чтении: инциденты со статусом `OPEN`/`ACKNOWLEDGED` за окно `ATTACK_WINDOW` (по умолчанию 15m).  
+`period` для stats: `1h`, `24h`, `7d` или положительный Go duration (не больше 30d).  
+`protocols`: `[{ "protocol", "flows", "bytes", "packets" }, ...]`.
 
 ### Telegram
 
