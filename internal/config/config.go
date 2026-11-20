@@ -38,6 +38,10 @@ type Config struct {
 	LLMAPIKey             string
 	LLMBaseURL            string
 	AttackWindow          time.Duration
+	WSClientBuffer        int
+	WSWriteWait           time.Duration
+	WSPongWait            time.Duration
+	WSPingPeriod          time.Duration
 	LogLevel              string
 }
 
@@ -75,6 +79,10 @@ func Load() (Config, error) {
 		LLMAPIKey:             os.Getenv("LLM_API_KEY"),
 		LLMBaseURL:            strings.TrimSpace(os.Getenv("LLM_BASE_URL")),
 		AttackWindow:          getDuration("ATTACK_WINDOW", 15*time.Minute),
+		WSClientBuffer:        getInt("WS_CLIENT_BUFFER", 64),
+		WSWriteWait:           getDuration("WS_WRITE_WAIT", 10*time.Second),
+		WSPongWait:            getDuration("WS_PONG_WAIT", 60*time.Second),
+		WSPingPeriod:          getDuration("WS_PING_PERIOD", 54*time.Second),
 		LogLevel:              getEnv("LOG_LEVEL", "info"),
 	}
 
@@ -137,6 +145,21 @@ func (c Config) validate() error {
 	}
 	if c.TelegramHTTPTimeout <= 0 {
 		return fmt.Errorf("TELEGRAM_HTTP_TIMEOUT must be positive")
+	}
+	if c.WSClientBuffer <= 0 {
+		return fmt.Errorf("WS_CLIENT_BUFFER must be positive")
+	}
+	if c.WSWriteWait <= 0 {
+		return fmt.Errorf("WS_WRITE_WAIT must be positive")
+	}
+	if c.WSPongWait <= 0 {
+		return fmt.Errorf("WS_PONG_WAIT must be positive")
+	}
+	if c.WSPingPeriod <= 0 {
+		return fmt.Errorf("WS_PING_PERIOD must be positive")
+	}
+	if c.WSPingPeriod >= c.WSPongWait {
+		return fmt.Errorf("WS_PING_PERIOD must be less than WS_PONG_WAIT")
 	}
 	return nil
 }

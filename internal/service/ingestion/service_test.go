@@ -10,6 +10,7 @@ import (
 	"github.com/Network-Detection-and-Response/backend/internal/agent"
 	"github.com/Network-Detection-and-Response/backend/internal/domain"
 	"github.com/Network-Detection-and-Response/backend/internal/integrations/ml"
+	"github.com/Network-Detection-and-Response/backend/internal/realtime"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
@@ -370,5 +371,112 @@ func TestServiceMLOutageDoesNotBlockNextBatch(t *testing.T) {
 	}
 	if len(store.incidents) != 1 {
 		t.Fatalf("incidents=%d", len(store.incidents))
+	}
+}
+
+type mockRealtime struct {
+	events []realtime.Event
+}
+
+func (m *mockRealtime) Publish(evt realtime.Event) {
+	m.events = append(m.events, evt)
+}
+
+func TestServicePublishesRealtimeEvents(t *testing.T) {
+	store := &mockStore{}
+	rt := &mockRealtime{}
+	flowID := uuid.New()
+	pred := &mockPredictor{
+		configured: true,
+		preds: []ml.Prediction{{
+			FlowID: flowID,
+			Probabilities: map[string]float64{
+				"Normal": 0.05, "PortScan": 0.80, "DDoS": 0.10, "BruteForce": 0.05,
+			},
+		}},
+	}
+	svc := NewService(store, Options{
+		Predictor:     pred,
+		DecisionStore: store,
+		Agent:         agent.New(agent.Config{AttackThreshold: 0.60, DDoSCriticalThreshold: 0.85}, nil),
+		Realtime:      rt,
+	})
+	job := BatchJob{
+		BatchID: uuid.New(), SensorID: "s1", ObservedAt: time.Now().UTC(),
+		Flows: []domain.Flow{{
+			ID: flowID, SrcIP: netip.MustParseAddr("1.1.1.1"), DstIP: netip.MustParseAddr("2.2.2.2"),
+			Protocol: "TCP", ObservedAt: time.Now().UTC(), TotalBytes: 50, TotalPackets: 3,
+		}},
+	}
+	if err := svc.ProcessBatch(context.Background(), job); err != nil {
+		t.Fatalf("ProcessBatch: %v", err)
+	}
+
+	types := map[string]int{}
+	for _, e := range rt.events {
+		types[e.Type]++
+	}
+	if types[realtime.TypeFlowStats] != 1 || types[realtime.TypeTopologyUpdated] != 1 {
+		t.Fatalf("batch events=%v", types)
+	}
+	if types[realtime.TypeIncidentAlert] != 1 {
+		t.Fatalf("expected INCIDENT_ALERT, got %v events=%v", types, rt.events)
+	}
+}
+
+func TestServiceNoRealtimeOnPersistFailure(t *testing.T) {
+	store := &mockStore{failInsert: true}
+	rt := &mockRealtime{}
+	svc := NewService(store, Options{Realtime: rt})
+	err := svc.ProcessBatch(context.Background(), BatchJob{
+		BatchID: uuid.New(),
+		Flows: []domain.Flow{{
+			ID: uuid.New(), SrcIP: netip.MustParseAddr("1.1.1.1"), DstIP: netip.MustParseAddr("2.2.2.2"),
+			Protocol: "UDP", ObservedAt: time.Now().UTC(),
+		}},
+	})
+	if err == nil {
+		t.Fatal("expected persist error")
+	}
+	if len(rt.events) != 0 {
+		t.Fatalf("must not publish WS events before successful persist, got %d", len(rt.events))
+	}
+}
+
+func TestServiceNoIncidentAlertWhenInsertFails(t *testing.T) {
+	store := &mockStore{failIncident: true}
+	rt := &mockRealtime{}
+	flowID := uuid.New()
+	pred := &mockPredictor{
+		configured: true,
+		preds: []ml.Prediction{{
+			FlowID: flowID,
+			Probabilities: map[string]float64{
+				"Normal": 0.05, "PortScan": 0.80, "DDoS": 0.10, "BruteForce": 0.05,
+			},
+		}},
+	}
+	svc := NewService(store, Options{
+		Predictor:     pred,
+		DecisionStore: store,
+		Agent:         agent.New(agent.Config{AttackThreshold: 0.60, DDoSCriticalThreshold: 0.85}, nil),
+		Realtime:      rt,
+	})
+	if err := svc.ProcessBatch(context.Background(), BatchJob{
+		BatchID: uuid.New(),
+		Flows: []domain.Flow{{
+			ID: flowID, SrcIP: netip.MustParseAddr("1.1.1.1"), DstIP: netip.MustParseAddr("2.2.2.2"),
+			Protocol: "TCP", ObservedAt: time.Now().UTC(),
+		}},
+	}); err != nil {
+		t.Fatalf("ProcessBatch: %v", err)
+	}
+	for _, e := range rt.events {
+		if e.Type == realtime.TypeIncidentAlert {
+			t.Fatal("INCIDENT_ALERT must not be published when incident insert fails")
+		}
+	}
+	if len(rt.events) != 2 {
+		t.Fatalf("expected FLOW_STATS+TOPOLOGY_UPDATED only, got %d", len(rt.events))
 	}
 }

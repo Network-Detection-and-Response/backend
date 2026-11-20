@@ -15,6 +15,7 @@ import (
 	"github.com/Network-Detection-and-Response/backend/internal/integrations/ml"
 	"github.com/Network-Detection-and-Response/backend/internal/notifications"
 	"github.com/Network-Detection-and-Response/backend/internal/observability"
+	"github.com/Network-Detection-and-Response/backend/internal/realtime"
 	"github.com/Network-Detection-and-Response/backend/internal/repository/postgres"
 	"github.com/Network-Detection-and-Response/backend/internal/service/incidents"
 	"github.com/Network-Detection-and-Response/backend/internal/service/ingestion"
@@ -86,11 +87,20 @@ func main() {
 		DDoSCriticalThreshold: cfg.DDoSCriticalThreshold,
 	}, explainer)
 
+	hub := realtime.NewHub(realtime.Config{
+		AllowedOrigins: cfg.CORSAllowedOrigins,
+		ClientBuffer:   cfg.WSClientBuffer,
+		WriteWait:      cfg.WSWriteWait,
+		PongWait:       cfg.WSPongWait,
+		PingPeriod:     cfg.WSPingPeriod,
+	}, log)
+
 	ingestSvc := ingestion.NewService(store, ingestion.Options{
 		Predictor:     mlClient,
 		DecisionStore: store,
 		Agent:         decisionAgent,
 		Notifier:      notifyQueue,
+		Realtime:      hub,
 		Log:           log,
 		HistoryWindow: cfg.AttackWindow,
 	})
@@ -116,6 +126,7 @@ func main() {
 		IncidentService: incidentSvc,
 		TopologyService: topologySvc,
 		StatsService:    statsSvc,
+		Realtime:        hub,
 	})
 
 	srv := &http.Server{
@@ -144,6 +155,8 @@ func main() {
 		log.Error("http_shutdown_failed", "error", err.Error())
 	}
 	httpCancel()
+
+	hub.Shutdown()
 
 	queueCtx, queueCancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	queue.Shutdown(queueCtx)

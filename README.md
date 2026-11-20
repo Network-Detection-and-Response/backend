@@ -21,17 +21,18 @@ Backend учебной системы **Network Detection and Response** на Go
 - Telegram: опциональная очередь с retry; только HIGH/CRITICAL; сбой Telegram не блокирует ingestion
 - `GET /api/v1/topology` — наблюдаемый граф связей (не физическая схема); `is_compromised` / `is_under_attack` из активных инцидентов за `ATTACK_WINDOW`
 - `GET /api/v1/stats/overview?period=24h` — агрегаты flows/bytes/packets и инцидентов
+- `GET /ws/stream` — realtime WebSocket (`FLOW_STATS`, `INCIDENT_ALERT`, `TOPOLOGY_UPDATED`); REST остаётся источником начальной загрузки
 - Репозитории для работы с этими таблицами
 - Базовые автотесты и команды сборки/проверки
 
 ## Что планируется дальше
 
-1. Realtime-события по WebSocket
+1. Интеграционный review / сверка контрактов с командой (Sensor, ML, Frontend)
 
 ## Стек
 
 - Go 1.22+
-- Gin, pgx, PostgreSQL 16
+- Gin, gorilla/websocket, pgx, PostgreSQL 16
 - Docker Compose
 - goose (миграции)
 
@@ -121,12 +122,29 @@ curl -s "http://localhost:8080/api/v1/stats/overview?period=24h"
 `period` для stats: `1h`, `24h`, `7d` или положительный Go duration (не больше 30d).  
 `protocols`: `[{ "protocol", "flows", "bytes", "packets" }, ...]`.
 
+### WebSocket realtime
+
+`GET /ws/stream` — одно соединение для dashboard. События — JSON envelope:
+
+```json
+{ "type": "INCIDENT_ALERT", "timestamp": "2026-10-09T14:30:00Z", "data": { "incident_id": "<uuid>", "severity": "HIGH" } }
+```
+
+Типы: `FLOW_STATS` (после успешного persist батча), `TOPOLOGY_UPDATED` (после upsert nodes/edges), `INCIDENT_ALERT` (после создания инцидента).  
+`data` для `INCIDENT_ALERT`: `{ "incident_id", "severity" }` (+ опционально `attack_class`, `status`).  
+`FLOW_STATS`: `{ "batch_id", "accepted_flows", "bytes_total", "packets_total" }`.  
+`TOPOLOGY_UPDATED`: `{ "batch_id", "nodes_upserted", "edges_upserted" }`.
+
+**Безопасность (учебный стенд):** проверка `Origin` по `CORS_ALLOWED_ORIGINS` — это не авторизация пользователя. Пустой Origin (non-browser) допускается. Как и остальные dashboard REST (`/incidents`, `/topology`, `/stats`), `GET /ws/stream` **не требует** session/token: любой клиент, дошедший до endpoint, может получать realtime-события о сети и инцидентах. Это осознанное ограничение учебного стенда, не production-ready IAM.
+
+На клиента — ограниченный буфер (`WS_CLIENT_BUFFER`); медленный клиент не блокирует ingestion. **При полном буфере исходящие события для этого клиента могут теряться** (дропаются без retry/replay). Ping/pong и write deadlines — `WS_*`. При shutdown соединения закрываются, hub ждёт завершения read/write pumps. Горизонтальное масштабирование WS без внешнего брокера не обещается. Frontend после reconnect загружает состояние через REST.
+
 ### Telegram
 
 Включается только при обоих `TELEGRAM_BOT_TOKEN` и `TELEGRAM_CHAT_ID`. Отправляются только новые инциденты severity `HIGH`/`CRITICAL` (не `FALSE_POSITIVE`). Очередь in-memory: **не переживает перезапуск**, доставка не гарантирована; при переполнении сообщение дропается (счётчик/лог), pipeline не блокируется. Токены в логи не пишутся. Тесты используют mock HTTP, не реальный чат.
 
 Обязательные переменные в `.env`: `DATABASE_URL`, `SENSOR_API_KEY`.  
-Опционально: `ML_SERVICE_URL`, `ATTACK_THRESHOLD` (`0.60`), `DDOS_CRITICAL_THRESHOLD` (`0.85`), Telegram/LLM.  
+Опционально: `ML_SERVICE_URL`, `ATTACK_THRESHOLD` (`0.60`), `DDOS_CRITICAL_THRESHOLD` (`0.85`), `WS_*`, Telegram/LLM.  
 Контракт ML: `docs/ML_CONTRACT.md` (реальный Python API пока не подтверждён).  
 Whitelist — **UTC**. Рекомендации advisory only — IP не блокируется.  
 Файл `.env` в git не коммитится. Dashboard API без пользовательской авторизации (учебный стенд).

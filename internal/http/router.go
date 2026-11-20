@@ -6,6 +6,7 @@ import (
 	"github.com/Network-Detection-and-Response/backend/internal/config"
 	"github.com/Network-Detection-and-Response/backend/internal/http/handlers"
 	"github.com/Network-Detection-and-Response/backend/internal/http/middleware"
+	"github.com/Network-Detection-and-Response/backend/internal/realtime"
 	"github.com/Network-Detection-and-Response/backend/internal/service/incidents"
 	"github.com/Network-Detection-and-Response/backend/internal/service/stats"
 	"github.com/Network-Detection-and-Response/backend/internal/service/topology"
@@ -21,9 +22,10 @@ type Dependencies struct {
 	IncidentService *incidents.Service
 	TopologyService *topology.Service
 	StatsService    *stats.Service
+	Realtime        *realtime.Hub
 }
 
-// NewRouter builds the Gin engine with health, flows, incidents, topology and stats.
+// NewRouter builds the Gin engine with health, flows, incidents, topology, stats and WebSocket.
 func NewRouter(deps Dependencies) *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
@@ -36,6 +38,11 @@ func NewRouter(deps Dependencies) *gin.Engine {
 	health := &handlers.Health{DB: deps.DB}
 	r.GET("/healthz", health.Healthz)
 	r.GET("/readyz", health.Readyz)
+
+	if deps.Realtime != nil {
+		ws := &handlers.Stream{Hub: deps.Realtime}
+		r.GET("/ws/stream", ws.Serve)
+	}
 
 	flows := &handlers.Flows{
 		Enqueuer:         deps.FlowEnqueuer,

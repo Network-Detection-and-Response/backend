@@ -11,6 +11,7 @@ import (
 	"github.com/Network-Detection-and-Response/backend/internal/agent"
 	"github.com/Network-Detection-and-Response/backend/internal/domain"
 	"github.com/Network-Detection-and-Response/backend/internal/integrations/ml"
+	"github.com/Network-Detection-and-Response/backend/internal/realtime"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
@@ -47,6 +48,7 @@ type Service struct {
 	decisions     DecisionStore
 	agent         *agent.Agent
 	notifier      IncidentNotifier
+	realtime      EventPublisher
 	log           *slog.Logger
 	historyWindow time.Duration
 	mlFailures    atomic.Int64
@@ -58,12 +60,18 @@ type IncidentNotifier interface {
 	Enqueue(inc domain.Incident)
 }
 
+// EventPublisher fans out realtime dashboard events without blocking the pipeline.
+type EventPublisher interface {
+	Publish(evt realtime.Event)
+}
+
 // Options configures optional ML / decision / notification wiring.
 type Options struct {
 	Predictor     Predictor
 	DecisionStore DecisionStore
 	Agent         *agent.Agent
 	Notifier      IncidentNotifier
+	Realtime      EventPublisher
 	Log           *slog.Logger
 	HistoryWindow time.Duration
 }
@@ -84,6 +92,7 @@ func NewService(store BatchStore, opts Options) *Service {
 		decisions:     opts.DecisionStore,
 		agent:         opts.Agent,
 		notifier:      opts.Notifier,
+		realtime:      opts.Realtime,
 		log:           log,
 		historyWindow: window,
 	}
@@ -123,8 +132,25 @@ func (s *Service) ProcessBatch(ctx context.Context, job BatchJob) error {
 		return err
 	}
 
+	s.publishBatchEvents(job, len(nodes), len(edges))
 	s.scoreAndDecide(ctx, job)
 	return nil
+}
+
+func (s *Service) publishBatchEvents(job BatchJob, nodeCount, edgeCount int) {
+	if s.realtime == nil {
+		return
+	}
+	if evt, err := realtime.FlowStatsEvent(job.BatchID, job.Flows); err != nil {
+		s.log.Error("ws_flow_stats_build_failed", "batch_id", job.BatchID.String(), "error", err.Error())
+	} else {
+		s.realtime.Publish(evt)
+	}
+	if evt, err := realtime.TopologyUpdatedEvent(job.BatchID, nodeCount, edgeCount); err != nil {
+		s.log.Error("ws_topology_event_build_failed", "batch_id", job.BatchID.String(), "error", err.Error())
+	} else {
+		s.realtime.Publish(evt)
+	}
 }
 
 func (s *Service) scoreAndDecide(ctx context.Context, job BatchJob) {
@@ -225,6 +251,16 @@ func (s *Service) scoreAndDecide(ctx context.Context, job BatchJob) {
 		)
 		if s.notifier != nil {
 			s.notifier.Enqueue(inc)
+		}
+		if s.realtime != nil {
+			if evt, err := realtime.IncidentAlertEvent(inc); err != nil {
+				s.log.Error("ws_incident_alert_build_failed",
+					"incident_id", inc.ID.String(),
+					"error", err.Error(),
+				)
+			} else {
+				s.realtime.Publish(evt)
+			}
 		}
 	}
 }
