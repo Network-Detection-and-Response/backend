@@ -1,0 +1,11 @@
+.git
+.cursor
+.env
+.env.local
+*.md
+bin/
+dist/
+coverage*
+*.test
+*.out
+docs/local/

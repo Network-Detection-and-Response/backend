@@ -2,6 +2,10 @@
 FROM golang:1.25-alpine AS builder
 WORKDIR /src
 
+# sum.golang.org is often unreachable from some networks; module checksums still verified via go.sum.
+ENV GOPROXY=https://proxy.golang.org,https://goproxy.io,direct \
+	GOSUMDB=off
+
 RUN apk add --no-cache git ca-certificates
 
 COPY go.mod go.sum ./
@@ -14,7 +18,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -o /out/api ./cmd/api
 FROM alpine:3.20
 WORKDIR /app
 
-RUN apk add --no-cache ca-certificates tzdata \
+RUN apk add --no-cache ca-certificates tzdata wget \
 	&& adduser -D -H -u 10001 appuser
 
 COPY --from=builder /out/api /app/api

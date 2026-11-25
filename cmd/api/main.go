@@ -40,9 +40,15 @@ func main() {
 		"persist_retry_base_delay", cfg.PersistRetryBaseDelay.String(),
 		"telegram_enabled", cfg.TelegramEnabled(),
 		"llm_enabled", cfg.LLMEnabled(),
-		"ml_configured", cfg.MLServiceURL != "",
+		"ml_enabled", cfg.MLConfigured(),
+		"ml_service_url_set", cfg.MLServiceURL != "",
 		"attack_threshold", cfg.AttackThreshold,
 	)
+	if !cfg.MLConfigured() {
+		log.Warn("ml_disabled",
+			"reason", "ML_SERVICE_URL empty or ML_ENABLED=false; flows persist without predictions or ML-driven incidents",
+		)
+	}
 
 	ctx := context.Background()
 	pool, err := postgres.Connect(ctx, cfg.DatabaseURL)
@@ -74,7 +80,12 @@ func main() {
 		log,
 	)
 
-	mlClient := ml.NewClient(cfg.MLServiceURL, cfg.MLTimeout)
+	var predictor ingestion.Predictor
+	if cfg.MLConfigured() {
+		predictor = ml.NewClient(cfg.MLServiceURL, cfg.MLTimeout)
+		log.Info("ml_client_ready", "url", cfg.MLServiceURL)
+	}
+
 	var explainer agent.Explainer = agent.TemplateExplainer{}
 	if cfg.LLMEnabled() {
 		if llm := agent.NewHTTPLLMClient(cfg.LLMBaseURL, cfg.LLMAPIKey, 5*time.Second); llm != nil {
@@ -95,15 +106,20 @@ func main() {
 		PingPeriod:     cfg.WSPingPeriod,
 	}, log)
 
-	ingestSvc := ingestion.NewService(store, ingestion.Options{
-		Predictor:     mlClient,
-		DecisionStore: store,
-		Agent:         decisionAgent,
-		Notifier:      notifyQueue,
+	ingestOpts := ingestion.Options{
 		Realtime:      hub,
 		Log:           log,
 		HistoryWindow: cfg.AttackWindow,
-	})
+		Notifier:      notifyQueue,
+	}
+	// Wire Decision Agent only when ML is active — no fabricated predictions without ML.
+	if predictor != nil {
+		ingestOpts.Predictor = predictor
+		ingestOpts.DecisionStore = store
+		ingestOpts.Agent = decisionAgent
+	}
+
+	ingestSvc := ingestion.NewService(store, ingestOpts)
 	queue := ingestion.NewQueue(
 		cfg.QueueCapacity,
 		cfg.WorkerCount,

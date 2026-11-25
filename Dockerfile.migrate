@@ -1,0 +1,14 @@
+# One-shot goose migrator for Compose. Does not run the API.
+# Uses a GitHub release binary to avoid go install / sum.golang.org during build.
+FROM alpine:3.20
+ARG GOOSE_VERSION=3.26.0
+RUN apk add --no-cache ca-certificates curl \
+	&& curl -fsSL -o /usr/local/bin/goose \
+		"https://github.com/pressly/goose/releases/download/v${GOOSE_VERSION}/goose_linux_x86_64" \
+	&& chmod +x /usr/local/bin/goose \
+	&& goose -version
+WORKDIR /migrations
+COPY migrations/ /migrations/
+
+ENTRYPOINT ["goose", "-dir", "/migrations", "postgres"]
+CMD ["up"]

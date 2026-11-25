@@ -17,6 +17,7 @@ type Config struct {
 	ShutdownTimeout       time.Duration
 	DatabaseURL           string
 	SensorAPIKey          string
+	MLEnabled             bool
 	MLServiceURL          string
 	MLTimeout             time.Duration
 	AttackThreshold       float64
@@ -62,7 +63,10 @@ func Load() (Config, error) {
 		MLTimeout:             getDuration("ML_TIMEOUT", 5*time.Second),
 		AttackThreshold:       getFloat("ATTACK_THRESHOLD", 0.60),
 		DDoSCriticalThreshold: getFloat("DDOS_CRITICAL_THRESHOLD", 0.85),
-		CORSAllowedOrigins:    splitCSV(getEnv("CORS_ALLOWED_ORIGINS", "http://localhost:5173,http://localhost:3000")),
+		CORSAllowedOrigins: splitCSV(getEnv(
+			"CORS_ALLOWED_ORIGINS",
+			"http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000,http://127.0.0.1:3000",
+		)),
 		MaxBodyBytes:          getInt64("MAX_BODY_BYTES", 1<<20), // 1 MiB
 		MaxFlowsPerBatch:      getInt("MAX_FLOWS_PER_BATCH", 500),
 		QueueCapacity:         getInt("QUEUE_CAPACITY", 100),
@@ -83,13 +87,43 @@ func Load() (Config, error) {
 		WSWriteWait:           getDuration("WS_WRITE_WAIT", 10*time.Second),
 		WSPongWait:            getDuration("WS_PONG_WAIT", 60*time.Second),
 		WSPingPeriod:          getDuration("WS_PING_PERIOD", 54*time.Second),
-		LogLevel:              getEnv("LOG_LEVEL", "info"),
+		LogLevel: getEnv("LOG_LEVEL", "info"),
+	}
+
+	// ML is optional. ML_ENABLED=false forces disable even if ML_SERVICE_URL is set.
+	// When ML_ENABLED is unset, ML is on only if ML_SERVICE_URL is non-empty.
+	cfg.MLEnabled = resolveMLEnabled(cfg.MLServiceURL)
+	if !cfg.MLEnabled {
+		cfg.MLServiceURL = ""
 	}
 
 	if err := cfg.validate(); err != nil {
 		return Config{}, err
 	}
 	return cfg, nil
+}
+
+// resolveMLEnabled decides whether the ML client should be active.
+// Explicit ML_ENABLED=false/0/no/off disables ML; true/1/yes/on enables only with a URL.
+// Unset ML_ENABLED follows "URL present ⇒ enabled".
+func resolveMLEnabled(mlURL string) bool {
+	raw, set := os.LookupEnv("ML_ENABLED")
+	if !set || strings.TrimSpace(raw) == "" {
+		return mlURL != ""
+	}
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "0", "false", "no", "off":
+		return false
+	case "1", "true", "yes", "on":
+		return mlURL != ""
+	default:
+		return mlURL != ""
+	}
+}
+
+// MLConfigured reports whether ML scoring is active for this process.
+func (c Config) MLConfigured() bool {
+	return c.MLEnabled && c.MLServiceURL != ""
 }
 
 func (c Config) validate() error {
