@@ -13,9 +13,10 @@ var (
 	ErrValidation = fmt.Errorf("validation error")
 )
 
-// Store loads overview aggregates.
+// Store loads overview and timeseries aggregates.
 type Store interface {
 	LoadOverviewStats(ctx context.Context, since time.Time) (postgres.OverviewStats, error)
+	LoadMinuteBuckets(ctx context.Context, since, until time.Time) ([]postgres.MinuteBucket, error)
 }
 
 // Overview is the API response model for /stats/overview.
@@ -27,6 +28,8 @@ type Overview struct {
 	IncidentsTotal      int64
 	IncidentsBySeverity map[string]int64
 	Protocols           []ProtocolItem
+	TCPFlags            TCPFlagsItem
+	Sensors             []SensorItem
 }
 
 type ProtocolItem struct {
@@ -34,6 +37,38 @@ type ProtocolItem struct {
 	Flows    int64  `json:"flows"`
 	Bytes    int64  `json:"bytes"`
 	Packets  int64  `json:"packets"`
+}
+
+// TCPFlagsItem mirrors SUM(tcp_syn/ack/rst) for the overview window.
+type TCPFlagsItem struct {
+	SYN int64 `json:"syn"`
+	ACK int64 `json:"ack"`
+	RST int64 `json:"rst"`
+}
+
+// SensorItem is derived sensor activity (not a push heartbeat).
+type SensorItem struct {
+	SensorID    string `json:"sensor_id"`
+	LastBatchAt string `json:"last_batch_at"`
+	FlowsLast5m int64  `json:"flows_last_5m"`
+	Activity    string `json:"activity"`
+}
+
+// Timeseries is the API model for GET /stats/timeseries.
+type Timeseries struct {
+	Period   string
+	Bucket   string
+	Timezone string
+	From     time.Time
+	To       time.Time
+	Points   []TimeseriesPoint
+}
+
+type TimeseriesPoint struct {
+	T       string `json:"t"`
+	Flows   int64  `json:"flows"`
+	Packets int64  `json:"packets"`
+	Bytes   int64  `json:"bytes"`
 }
 
 // Service builds overview statistics for a requested period.
@@ -44,6 +79,14 @@ type Service struct {
 
 func NewService(store Store) *Service {
 	return &Service{store: store, now: time.Now}
+}
+
+// NewServiceWithClock is used by tests to inject a fixed clock.
+func NewServiceWithClock(store Store, now func() time.Time) *Service {
+	if now == nil {
+		now = time.Now
+	}
+	return &Service{store: store, now: now}
 }
 
 // Overview returns aggregates for period (default 24h). Supported: 1h, 24h, 7d, or Go duration.
@@ -70,6 +113,15 @@ func (s *Service) Overview(ctx context.Context, period string) (Overview, error)
 			Packets:  p.Packets,
 		})
 	}
+	sensors := make([]SensorItem, 0, len(raw.Sensors))
+	for _, sa := range raw.Sensors {
+		sensors = append(sensors, SensorItem{
+			SensorID:    sa.SensorID,
+			LastBatchAt: sa.LastBatchAt.UTC().Format(time.RFC3339),
+			FlowsLast5m: sa.FlowsLast5m,
+			Activity:    sa.Activity,
+		})
+	}
 	return Overview{
 		Period:              period,
 		FlowsTotal:          raw.FlowsTotal,
@@ -78,6 +130,51 @@ func (s *Service) Overview(ctx context.Context, period string) (Overview, error)
 		IncidentsTotal:      raw.IncidentsTotal,
 		IncidentsBySeverity: raw.IncidentsBySeverity,
 		Protocols:           protocols,
+		TCPFlags: TCPFlagsItem{
+			SYN: raw.TCPFlags.SYN,
+			ACK: raw.TCPFlags.ACK,
+			RST: raw.TCPFlags.RST,
+		},
+		Sensors: sensors,
+	}, nil
+}
+
+// TimeseriesLastHour returns 60 UTC minute buckets for the last hour (inclusive of current minute).
+// Minutes without flows are present with zero counters — values are never invented beyond gap-fill zeros.
+func (s *Service) TimeseriesLastHour(ctx context.Context) (Timeseries, error) {
+	now := s.now().UTC()
+	untilExclusive := now.Truncate(time.Minute).Add(time.Minute)
+	first := untilExclusive.Add(-60 * time.Minute) // 60 minutes: [first, untilExclusive)
+
+	raw, err := s.store.LoadMinuteBuckets(ctx, first, untilExclusive)
+	if err != nil {
+		return Timeseries{}, err
+	}
+	byMinute := make(map[int64]postgres.MinuteBucket, len(raw))
+	for _, b := range raw {
+		byMinute[b.Minute.UTC().Unix()] = b
+	}
+
+	points := make([]TimeseriesPoint, 0, 60)
+	for i := 0; i < 60; i++ {
+		m := first.Add(time.Duration(i) * time.Minute)
+		b := byMinute[m.Unix()]
+		points = append(points, TimeseriesPoint{
+			T:       m.Format(time.RFC3339),
+			Flows:   b.Flows,
+			Packets: b.Packets,
+			Bytes:   b.Bytes,
+		})
+	}
+
+	last := first.Add(59 * time.Minute)
+	return Timeseries{
+		Period:   "1h",
+		Bucket:   "1m",
+		Timezone: "UTC",
+		From:     first,
+		To:       last, // inclusive start of the last 1-minute bucket
+		Points:   points,
 	}, nil
 }
 

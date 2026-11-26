@@ -20,7 +20,8 @@ Backend учебной системы **Network Detection and Response** на Go
 - API инцидентов: `GET/PATCH /api/v1/incidents` (пагинация, фильтры, переходы статусов)
 - Telegram: опциональная очередь с retry; только HIGH/CRITICAL; сбой Telegram не блокирует ingestion
 - `GET /api/v1/topology` — наблюдаемый граф связей (не физическая схема); `is_compromised` / `is_under_attack` из активных инцидентов за `ATTACK_WINDOW`
-- `GET /api/v1/stats/overview?period=24h` — агрегаты flows/bytes/packets и инцидентов
+- `GET /api/v1/stats/overview?period=24h` — агрегаты flows/bytes/packets, инцидентов, `tcp_flags`, `sensors`
+- `GET /api/v1/stats/timeseries?period=1h` — поминутная телеметрия за последний час (UTC, zero-fill)
 - `GET /ws/stream` — realtime WebSocket (`FLOW_STATS`, `INCIDENT_ALERT`, `TOPOLOGY_UPDATED`); REST остаётся источником начальной загрузки
 - Репозитории для работы с этими таблицами
 - Базовые автотесты и команды сборки/проверки
@@ -114,17 +115,60 @@ curl -s -X PATCH "http://localhost:8080/api/v1/incidents/<uuid>" \
 Допустимые PATCH-статусы: `ACKNOWLEDGED`, `RESOLVED`, `FALSE_POSITIVE`.  
 Переходы: `OPEN → ACKNOWLEDGED|RESOLVED|FALSE_POSITIVE`; `ACKNOWLEDGED → RESOLVED|FALSE_POSITIVE`; `RESOLVED`/`FALSE_POSITIVE` терминальны.
 
+### Порты в `POST /api/v1/flows` (Sensor contract)
+
+PostgreSQL уже допускает `0..65535`. HTTP-валидация protocol-aware:
+
+| Протокол | Правило |
+|----------|---------|
+| `ICMP` | `src_port`/`dst_port` ∈ `0..65535` (Sensor шлёт `0/0`) |
+| `TCP`/`UDP` обычный поток | оба порта ∈ `1..65535` |
+| `TCP`/`UDP` flood summary | `src_port = 0` (маркер `DroppedFloodAggregator`); `dst_port` ∈ `0..65535` |
+| прочие | оба порта ∈ `1..65535` (port 0 **не** разрешён безусловно) |
+
 ### Топология и статистика
 
 ```bash
 curl -s http://localhost:8080/api/v1/topology
 curl -s "http://localhost:8080/api/v1/stats/overview?period=24h"
+curl -s "http://localhost:8080/api/v1/stats/timeseries?period=1h"
 ```
 
 Топология — **наблюдаемые** коммуникации sensor→backend (IP/MAC), не гарантированная L2/L3 схема сети.  
 Флаги атаки считаются на чтении: инциденты со статусом `OPEN`/`ACKNOWLEDGED` за окно `ATTACK_WINDOW` (по умолчанию 15m).  
-`period` для stats: `1h`, `24h`, `7d` или положительный Go duration (не больше 30d).  
+`period` для overview: `1h`, `24h`, `7d` или положительный Go duration (не больше 30d).  
 `protocols`: `[{ "protocol", "flows", "bytes", "packets" }, ...]`.
+
+**Additive overview fields (обратная совместимость):**
+
+```json
+"tcp_flags": { "syn": 0, "ack": 0, "rst": 0 },
+"sensors": [{
+  "sensor_id": "core_switch_mirror",
+  "last_batch_at": "2026-11-25T14:30:00Z",
+  "flows_last_5m": 12,
+  "activity": "active"
+}]
+```
+
+`tcp_flags` — `SUM(tcp_syn/ack/rst)` по `network_flows` за выбранный `period`.  
+`sensors` — **не heartbeat**: `last_batch_at = MAX(observed_at)` за последние 24h (это timestamp батча Sensor).  
+Правило `activity`: `active` ≤2m, `idle` ≤15m, иначе `stale`. Статус `online` **не** используется.
+
+**Timeseries contract** (`GET /api/v1/stats/timeseries?period=1h` — только `1h`):
+
+```json
+{
+  "period": "1h",
+  "bucket": "1m",
+  "timezone": "UTC",
+  "from": "2026-11-25T13:31:00Z",
+  "to": "2026-11-25T14:30:00Z",
+  "points": [{ "t": "2026-11-25T13:31:00Z", "flows": 0, "packets": 0, "bytes": 0 }]
+}
+```
+
+Ровно 60 минут UTC; пустые минуты — нули (не синтетический трафик). Сортировка по `t` ASC. Индекс `network_flows_observed_at_idx` достаточен; новых индексов не добавлялось.
 
 ### WebSocket realtime
 
@@ -195,7 +239,7 @@ Compose `backend` собирает API, но **не** накатывает goose
 **Sensor**
 - Timestamp относится к батчу целиком или к каждому flow?
 - Гарантирует ли сенсор unique flow IDs, или ID всегда выдаёт backend?
-- Допустимы ли `src_port`/`dst_port` = 0 для не-TCP/UDP?
+- Port 0: закрыто на Backend (ICMP `0/0`, flood `src_port=0`); отдельный heartbeat от Sensor **не** реализован — activity выводится из `observed_at`.
 - Точное имя заголовка ключа и переменной конфигурации на стороне сенсора?
 
 **ML**

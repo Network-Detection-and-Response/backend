@@ -104,3 +104,63 @@ func (s *Store) CountRecentFlowsBySrcIP(ctx context.Context, srcIP netip.Addr, s
 	).Scan(&n)
 	return n, err
 }
+
+// FlowListItem is a compact projection for GET /api/v1/flows (dashboard Recent flows).
+type FlowListItem struct {
+	ID           uuid.UUID
+	SensorID     string
+	ObservedAt   time.Time
+	SrcIP        netip.Addr
+	DstIP        netip.Addr
+	SrcPort      int
+	DstPort      int
+	Protocol     string
+	TotalPackets int64
+	TotalBytes   int64
+}
+
+// ListRecentFlows returns flows ordered by observed_at DESC, then id DESC for stable paging.
+func (s *Store) ListRecentFlows(ctx context.Context, limit, offset int) ([]FlowListItem, int64, error) {
+	if limit < 1 {
+		limit = 50
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	var total int64
+	if err := s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM network_flows`).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count flows: %w", err)
+	}
+
+	const q = `
+SELECT id, sensor_id, observed_at,
+       src_ip, dst_ip, src_port, dst_port, protocol,
+       total_packets, total_bytes
+FROM network_flows
+ORDER BY observed_at DESC, id DESC
+LIMIT $1 OFFSET $2`
+
+	rows, err := s.pool.Query(ctx, q, limit, offset)
+	if err != nil {
+		return nil, 0, fmt.Errorf("list flows: %w", err)
+	}
+	defer rows.Close()
+
+	items := make([]FlowListItem, 0, limit)
+	for rows.Next() {
+		var item FlowListItem
+		if err := rows.Scan(
+			&item.ID, &item.SensorID, &item.ObservedAt,
+			&item.SrcIP, &item.DstIP, &item.SrcPort, &item.DstPort, &item.Protocol,
+			&item.TotalPackets, &item.TotalBytes,
+		); err != nil {
+			return nil, 0, fmt.Errorf("scan flow: %w", err)
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("iterate flows: %w", err)
+	}
+	return items, total, nil
+}

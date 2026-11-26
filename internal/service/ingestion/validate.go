@@ -152,19 +152,16 @@ func validateFlow(fr FlowRequest, index int, batchID uuid.UUID, sensorID string,
 		return domain.Flow{}, err
 	}
 
-	if err := validatePort(fr.SrcPort, prefix+".src_port"); err != nil {
-		return domain.Flow{}, err
-	}
-	if err := validatePort(fr.DstPort, prefix+".dst_port"); err != nil {
-		return domain.Flow{}, err
-	}
-
 	protocol := strings.ToUpper(strings.TrimSpace(fr.Protocol))
 	if protocol == "" {
 		return domain.Flow{}, &ValidationError{
 			Code:    "VALIDATION_ERROR",
 			Message: fmt.Sprintf("%s.protocol is required", prefix),
 		}
+	}
+
+	if err := validatePorts(fr.SrcPort, fr.DstPort, protocol, prefix); err != nil {
+		return domain.Flow{}, err
 	}
 
 	if fr.DurationMs < 0 {
@@ -235,12 +232,57 @@ func optionalMAC(raw *string, field string) (*string, error) {
 	return &normalized, nil
 }
 
-func validatePort(port int, field string) error {
-	// API_CONTRACTS: ports are 1..65535 for this course version.
-	if port < 1 || port > 65535 {
+// validatePorts enforces protocol-aware port rules matching the Sensor contract:
+//   - ICMP: ports are unused → 0..65535 (Sensor sends 0/0)
+//   - TCP/UDP flood summary: src_port=0 is the DroppedFloodAggregator marker;
+//     dst_port may be 0..65535 (last dropped packet)
+//   - TCP/UDP normal flows: both ports must be 1..65535
+//   - Other protocols: both ports must be 1..65535 (port 0 is not allowed unconditionally)
+func validatePorts(srcPort, dstPort int, protocol, prefix string) error {
+	if err := validatePortRange(srcPort, prefix+".src_port"); err != nil {
+		return err
+	}
+	if err := validatePortRange(dstPort, prefix+".dst_port"); err != nil {
+		return err
+	}
+
+	switch protocol {
+	case "ICMP":
+		return nil
+	case "TCP", "UDP":
+		if srcPort == 0 {
+			// Flood marker from Sensor (src_port=0); dst already in 0..65535.
+			return nil
+		}
+		if srcPort < 1 || dstPort < 1 {
+			return &ValidationError{
+				Code: "VALIDATION_ERROR",
+				Message: fmt.Sprintf(
+					"%s: for %s, ports must be 1..65535 (src_port=0 only allowed as flood marker)",
+					prefix, protocol,
+				),
+			}
+		}
+		return nil
+	default:
+		if srcPort < 1 || dstPort < 1 {
+			return &ValidationError{
+				Code: "VALIDATION_ERROR",
+				Message: fmt.Sprintf(
+					"%s: for protocol %s, ports must be 1..65535",
+					prefix, protocol,
+				),
+			}
+		}
+		return nil
+	}
+}
+
+func validatePortRange(port int, field string) error {
+	if port < 0 || port > 65535 {
 		return &ValidationError{
 			Code:    "VALIDATION_ERROR",
-			Message: fmt.Sprintf("%s must be in range 1..65535", field),
+			Message: fmt.Sprintf("%s must be in range 0..65535", field),
 		}
 	}
 	return nil

@@ -29,11 +29,16 @@ func (t *topoStore) TopologySnapshot(ctx context.Context, attackSince time.Time)
 }
 
 type statsStore struct {
-	out postgres.OverviewStats
+	out     postgres.OverviewStats
+	buckets []postgres.MinuteBucket
 }
 
 func (s *statsStore) LoadOverviewStats(ctx context.Context, since time.Time) (postgres.OverviewStats, error) {
 	return s.out, nil
+}
+
+func (s *statsStore) LoadMinuteBuckets(ctx context.Context, since, until time.Time) ([]postgres.MinuteBucket, error) {
+	return s.buckets, nil
 }
 
 func topologyStatsRouter(topo *topoStore, st *statsStore) http.Handler {
@@ -107,6 +112,12 @@ func TestStatsOverviewEndpoint(t *testing.T) {
 			"LOW": 0, "MEDIUM": 0, "HIGH": 0, "CRITICAL": 1,
 		},
 		Protocols: []postgres.ProtocolStat{{Protocol: "TCP", Flows: 2, Bytes: 100, Packets: 10}},
+		TCPFlags:  postgres.TCPFlagTotals{SYN: 5, ACK: 40, RST: 1},
+		Sensors: []postgres.SensorActivity{{
+			SensorID:    "core_switch_mirror",
+			LastBatchAt: time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC),
+			FlowsLast5m: 2, Activity: "stale",
+		}},
 	}})
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/stats/overview?period=24h", nil)
 	w := httptest.NewRecorder()
@@ -129,11 +140,64 @@ func TestStatsOverviewEndpoint(t *testing.T) {
 	if len(protocols) != 1 {
 		t.Fatalf("protocols=%v", protocols)
 	}
+	flags := data["tcp_flags"].(map[string]any)
+	if flags["syn"].(float64) != 5 || flags["ack"].(float64) != 40 || flags["rst"].(float64) != 1 {
+		t.Fatalf("tcp_flags=%v", flags)
+	}
+	sensors := data["sensors"].([]any)
+	if len(sensors) != 1 {
+		t.Fatalf("sensors=%v", sensors)
+	}
+	s0 := sensors[0].(map[string]any)
+	if s0["sensor_id"] != "core_switch_mirror" || s0["activity"] != "stale" {
+		t.Fatalf("sensor=%v", s0)
+	}
+	if s0["activity"] == "online" {
+		t.Fatal("must not report online")
+	}
 }
 
 func TestStatsOverviewRejectsBadPeriod(t *testing.T) {
 	r := topologyStatsRouter(&topoStore{}, &statsStore{})
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/stats/overview?period=nope", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d", w.Code)
+	}
+}
+
+func TestStatsTimeseriesEndpoint(t *testing.T) {
+	r := topologyStatsRouter(&topoStore{}, &statsStore{})
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/stats/timeseries?period=1h", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	data := body["data"].(map[string]any)
+	if data["period"] != "1h" || data["bucket"] != "1m" || data["timezone"] != "UTC" {
+		t.Fatalf("%v", data)
+	}
+	points := data["points"].([]any)
+	if len(points) != 60 {
+		t.Fatalf("points=%d", len(points))
+	}
+	p0 := points[0].(map[string]any)
+	for _, key := range []string{"t", "flows", "packets", "bytes"} {
+		if _, ok := p0[key]; !ok {
+			t.Fatalf("missing point field %s", key)
+		}
+	}
+}
+
+func TestStatsTimeseriesRejectsBadPeriod(t *testing.T) {
+	r := topologyStatsRouter(&topoStore{}, &statsStore{})
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/stats/timeseries?period=24h", nil)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 	if w.Code != http.StatusBadRequest {

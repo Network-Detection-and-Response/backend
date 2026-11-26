@@ -4,8 +4,10 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 
 	"github.com/Network-Detection-and-Response/backend/internal/http/response"
+	"github.com/Network-Detection-and-Response/backend/internal/service/flows"
 	"github.com/Network-Detection-and-Response/backend/internal/service/ingestion"
 	"github.com/gin-gonic/gin"
 )
@@ -15,10 +17,11 @@ type FlowEnqueuer interface {
 	TryEnqueue(job ingestion.BatchJob) bool
 }
 
-// Flows handles POST /api/v1/flows.
+// Flows handles POST /api/v1/flows (ingest) and GET /api/v1/flows (recent list).
 type Flows struct {
 	Enqueuer         FlowEnqueuer
 	MaxFlowsPerBatch int
+	ListService      *flows.Service
 }
 
 // AcceptBatch validates the sensor payload and enqueues it for async persistence.
@@ -62,5 +65,50 @@ func (h *Flows) AcceptBatch(c *gin.Context) {
 		"batch_id":       job.BatchID.String(),
 		"accepted_flows": len(job.Flows),
 		"status":         "accepted",
+	})
+}
+
+// List handles GET /api/v1/flows — recent flows for the dashboard.
+// Query: limit (1..200, default 50), offset (>=0, default 0). Sorted observed_at DESC.
+func (h *Flows) List(c *gin.Context) {
+	if h.ListService == nil {
+		response.WriteError(c, http.StatusNotFound, response.CodeNotFound, "flows list unavailable")
+		return
+	}
+
+	limitRaw := c.DefaultQuery("limit", strconv.Itoa(flows.DefaultLimit))
+	limit, err := strconv.Atoi(limitRaw)
+	if err != nil {
+		response.WriteError(c, http.StatusBadRequest, response.CodeValidation, "limit must be an integer")
+		return
+	}
+	offsetRaw := c.DefaultQuery("offset", "0")
+	offset, err := strconv.Atoi(offsetRaw)
+	if err != nil {
+		response.WriteError(c, http.StatusBadRequest, response.CodeValidation, "offset must be an integer")
+		return
+	}
+
+	result, err := h.ListService.List(c.Request.Context(), flows.ListQuery{
+		Limit:  limit,
+		Offset: offset,
+	})
+	if err != nil {
+		if errors.Is(err, flows.ErrValidation) {
+			response.WriteError(c, http.StatusBadRequest, response.CodeValidation, err.Error())
+			return
+		}
+		response.WriteError(c, http.StatusInternalServerError, response.CodeInternal, "failed to list flows")
+		return
+	}
+
+	response.WriteData(c, http.StatusOK, gin.H{
+		"items": result.Items,
+		"total": result.Total,
+		"pagination": gin.H{
+			"total":  result.Total,
+			"limit":  result.Limit,
+			"offset": result.Offset,
+		},
 	})
 }

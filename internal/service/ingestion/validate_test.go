@@ -1,6 +1,7 @@
 package ingestion
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -90,10 +91,117 @@ func TestDecodeAndValidateRejectsInvalidMAC(t *testing.T) {
 	assertValidation(t, err, "VALIDATION_ERROR", "src_mac")
 }
 
-func TestDecodeAndValidateRejectsInvalidPort(t *testing.T) {
-	body := strings.Replace(validBatchJSON(), `"src_port": 54321`, `"src_port": 0`, 1)
+func TestDecodeAndValidateRejectsOutOfRangePort(t *testing.T) {
+	body := strings.Replace(validBatchJSON(), `"src_port": 54321`, `"src_port": 65536`, 1)
 	_, err := DecodeAndValidate([]byte(body), 10)
 	assertValidation(t, err, "VALIDATION_ERROR", "src_port")
+}
+
+func TestDecodeAndValidateAcceptsICMPPortZero(t *testing.T) {
+	body := `{
+  "sensor_id": "s1",
+  "timestamp": "2026-10-09T14:30:00Z",
+  "flows": [{
+    "src_ip": "192.168.1.50",
+    "src_mac": null,
+    "dst_ip": "10.0.0.5",
+    "dst_mac": null,
+    "src_port": 0,
+    "dst_port": 0,
+    "protocol": "ICMP",
+    "duration_ms": 1,
+    "total_packets": 1,
+    "total_bytes": 64
+  }]
+}`
+	job, err := DecodeAndValidate([]byte(body), 10)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if job.Flows[0].Protocol != "ICMP" || job.Flows[0].SrcPort != 0 || job.Flows[0].DstPort != 0 {
+		t.Fatalf("flow=%+v", job.Flows[0])
+	}
+}
+
+func TestDecodeAndValidateAcceptsFloodSrcPortZero(t *testing.T) {
+	cases := []struct {
+		name     string
+		protocol string
+		dstPort  int
+	}{
+		{name: "tcp_flood", protocol: "TCP", dstPort: 80},
+		{name: "udp_flood", protocol: "UDP", dstPort: 53},
+		{name: "icmp_flood_like", protocol: "TCP", dstPort: 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := fmt.Sprintf(`{
+  "sensor_id": "s1",
+  "timestamp": "2026-10-09T14:30:00Z",
+  "flows": [{
+    "src_ip": "192.168.1.50",
+    "dst_ip": "10.0.0.5",
+    "src_port": 0,
+    "dst_port": %d,
+    "protocol": %q,
+    "duration_ms": 100,
+    "total_packets": 1000,
+    "total_bytes": 50000,
+    "tcp_flags": {"syn": 1000, "ack": 0, "rst": 0}
+  }]
+}`, tc.dstPort, tc.protocol)
+			job, err := DecodeAndValidate([]byte(body), 10)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if job.Flows[0].SrcPort != 0 || job.Flows[0].DstPort != tc.dstPort {
+				t.Fatalf("ports src=%d dst=%d", job.Flows[0].SrcPort, job.Flows[0].DstPort)
+			}
+		})
+	}
+}
+
+func TestDecodeAndValidateRejectsTCPDstPortZeroWithoutFlood(t *testing.T) {
+	body := strings.Replace(validBatchJSON(), `"dst_port": 443`, `"dst_port": 0`, 1)
+	_, err := DecodeAndValidate([]byte(body), 10)
+	assertValidation(t, err, "VALIDATION_ERROR", "1..65535")
+}
+
+func TestDecodeAndValidateRejectsPortZeroForOtherProtocol(t *testing.T) {
+	body := `{
+  "sensor_id": "s1",
+  "timestamp": "2026-10-09T14:30:00Z",
+  "flows": [{
+    "src_ip": "192.168.1.50",
+    "dst_ip": "10.0.0.5",
+    "src_port": 0,
+    "dst_port": 0,
+    "protocol": "SCTP",
+    "duration_ms": 1,
+    "total_packets": 1,
+    "total_bytes": 1
+  }]
+}`
+	_, err := DecodeAndValidate([]byte(body), 10)
+	assertValidation(t, err, "VALIDATION_ERROR", "1..65535")
+}
+
+func TestDecodeAndValidateAcceptsTCPUDPValidPorts(t *testing.T) {
+	body := `{
+  "sensor_id": "s1",
+  "timestamp": "2026-10-09T14:30:00Z",
+  "flows": [
+    {"src_ip":"1.1.1.1","dst_ip":"2.2.2.2","src_port":1,"dst_port":65535,"protocol":"TCP","duration_ms":0,"total_packets":1,"total_bytes":1},
+    {"src_ip":"1.1.1.1","dst_ip":"2.2.2.2","src_port":53,"dst_port":53,"protocol":"UDP","duration_ms":0,"total_packets":1,"total_bytes":1}
+  ]
+}`
+	job, err := DecodeAndValidate([]byte(body), 10)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(job.Flows) != 2 {
+		t.Fatalf("flows=%d", len(job.Flows))
+	}
 }
 
 func TestDecodeAndValidateRejectsNegativeCounters(t *testing.T) {

@@ -7,6 +7,7 @@ import (
 	"github.com/Network-Detection-and-Response/backend/internal/http/handlers"
 	"github.com/Network-Detection-and-Response/backend/internal/http/middleware"
 	"github.com/Network-Detection-and-Response/backend/internal/realtime"
+	"github.com/Network-Detection-and-Response/backend/internal/service/flows"
 	"github.com/Network-Detection-and-Response/backend/internal/service/incidents"
 	"github.com/Network-Detection-and-Response/backend/internal/service/stats"
 	"github.com/Network-Detection-and-Response/backend/internal/service/topology"
@@ -19,6 +20,7 @@ type Dependencies struct {
 	Log             *slog.Logger
 	DB              handlers.DBPinger
 	FlowEnqueuer    handlers.FlowEnqueuer
+	FlowListService *flows.Service
 	IncidentService *incidents.Service
 	TopologyService *topology.Service
 	StatsService    *stats.Service
@@ -44,13 +46,17 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		r.GET("/ws/stream", ws.Serve)
 	}
 
-	flows := &handlers.Flows{
+	flowHandlers := &handlers.Flows{
 		Enqueuer:         deps.FlowEnqueuer,
 		MaxFlowsPerBatch: deps.Config.MaxFlowsPerBatch,
+		ListService:      deps.FlowListService,
 	}
 	v1 := r.Group("/api/v1")
 	{
-		v1.POST("/flows", middleware.SensorAPIKey(deps.Config.SensorAPIKey), flows.AcceptBatch)
+		v1.POST("/flows", middleware.SensorAPIKey(deps.Config.SensorAPIKey), flowHandlers.AcceptBatch)
+		if deps.FlowListService != nil {
+			v1.GET("/flows", flowHandlers.List)
+		}
 		if deps.IncidentService != nil {
 			inc := &handlers.Incidents{Service: deps.IncidentService}
 			v1.GET("/incidents", inc.List)
@@ -64,6 +70,7 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		if deps.StatsService != nil {
 			st := &handlers.Stats{Service: deps.StatsService}
 			v1.GET("/stats/overview", st.Overview)
+			v1.GET("/stats/timeseries", st.Timeseries)
 		}
 	}
 

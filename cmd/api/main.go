@@ -17,6 +17,7 @@ import (
 	"github.com/Network-Detection-and-Response/backend/internal/observability"
 	"github.com/Network-Detection-and-Response/backend/internal/realtime"
 	"github.com/Network-Detection-and-Response/backend/internal/repository/postgres"
+	"github.com/Network-Detection-and-Response/backend/internal/service/flows"
 	"github.com/Network-Detection-and-Response/backend/internal/service/incidents"
 	"github.com/Network-Detection-and-Response/backend/internal/service/ingestion"
 	"github.com/Network-Detection-and-Response/backend/internal/service/stats"
@@ -134,11 +135,13 @@ func main() {
 	incidentSvc := incidents.NewService(store)
 	topologySvc := topology.NewService(store, cfg.AttackWindow)
 	statsSvc := stats.NewService(store)
+	flowListSvc := flows.NewService(store)
 	router := httpapi.NewRouter(httpapi.Dependencies{
 		Config:          cfg,
 		Log:             log,
 		DB:              pool,
 		FlowEnqueuer:    queue,
+		FlowListService: flowListSvc,
 		IncidentService: incidentSvc,
 		TopologyService: topologySvc,
 		StatsService:    statsSvc,
