@@ -17,6 +17,7 @@ import (
 	"github.com/Network-Detection-and-Response/backend/internal/observability"
 	"github.com/Network-Detection-and-Response/backend/internal/realtime"
 	"github.com/Network-Detection-and-Response/backend/internal/repository/postgres"
+	authsvc "github.com/Network-Detection-and-Response/backend/internal/service/auth"
 	"github.com/Network-Detection-and-Response/backend/internal/service/flows"
 	"github.com/Network-Detection-and-Response/backend/internal/service/incidents"
 	"github.com/Network-Detection-and-Response/backend/internal/service/ingestion"
@@ -40,10 +41,13 @@ func main() {
 		"persist_max_attempts", cfg.PersistMaxAttempts,
 		"persist_retry_base_delay", cfg.PersistRetryBaseDelay.String(),
 		"telegram_enabled", cfg.TelegramEnabled(),
+		"telegram_bot_url_set", cfg.TelegramBotURL != "",
 		"llm_enabled", cfg.LLMEnabled(),
 		"ml_enabled", cfg.MLConfigured(),
 		"ml_service_url_set", cfg.MLServiceURL != "",
 		"attack_threshold", cfg.AttackThreshold,
+		"auth_cookie_secure", cfg.AuthCookieSecure,
+		"session_ttl", cfg.SessionTTL.String(),
 	)
 	if !cfg.MLConfigured() {
 		log.Warn("ml_disabled",
@@ -136,6 +140,7 @@ func main() {
 	topologySvc := topology.NewService(store, cfg.AttackWindow)
 	statsSvc := stats.NewService(store)
 	flowListSvc := flows.NewService(store)
+	authSvc := authsvc.NewService(store, cfg.SessionTTL)
 	router := httpapi.NewRouter(httpapi.Dependencies{
 		Config:          cfg,
 		Log:             log,
@@ -145,6 +150,7 @@ func main() {
 		IncidentService: incidentSvc,
 		TopologyService: topologySvc,
 		StatsService:    statsSvc,
+		AuthService:     authSvc,
 		Realtime:        hub,
 	})
 

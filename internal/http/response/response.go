@@ -37,6 +37,7 @@ const (
 	CodeQueueFull       = "QUEUE_FULL"
 	CodeNotFound        = "NOT_FOUND"
 	CodeConflict        = "CONFLICT"
+	CodeRateLimited     = "RATE_LIMITED"
 	CodeInternal        = "INTERNAL_ERROR"
 )
 

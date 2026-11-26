@@ -19,6 +19,8 @@ func CORS(allowedOrigins []string) gin.HandlerFunc {
 			if _, ok := allowed[origin]; ok {
 				c.Header("Access-Control-Allow-Origin", origin)
 				c.Header("Vary", "Origin")
+				// Required for HttpOnly session cookies from the SPA. Never combine with "*".
+				c.Header("Access-Control-Allow-Credentials", "true")
 				c.Header("Access-Control-Allow-Headers", "Content-Type, X-Sensor-API-Key, Authorization")
 				c.Header("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS")
 			}

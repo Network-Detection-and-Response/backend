@@ -2,11 +2,13 @@ package httpapi
 
 import (
 	"log/slog"
+	"net/http"
 
 	"github.com/Network-Detection-and-Response/backend/internal/config"
 	"github.com/Network-Detection-and-Response/backend/internal/http/handlers"
 	"github.com/Network-Detection-and-Response/backend/internal/http/middleware"
 	"github.com/Network-Detection-and-Response/backend/internal/realtime"
+	authsvc "github.com/Network-Detection-and-Response/backend/internal/service/auth"
 	"github.com/Network-Detection-and-Response/backend/internal/service/flows"
 	"github.com/Network-Detection-and-Response/backend/internal/service/incidents"
 	"github.com/Network-Detection-and-Response/backend/internal/service/stats"
@@ -24,10 +26,11 @@ type Dependencies struct {
 	IncidentService *incidents.Service
 	TopologyService *topology.Service
 	StatsService    *stats.Service
+	AuthService     *authsvc.Service
 	Realtime        *realtime.Hub
 }
 
-// NewRouter builds the Gin engine with health, flows, incidents, topology, stats and WebSocket.
+// NewRouter builds the Gin engine with health, auth, flows, incidents, topology, stats and WebSocket.
 func NewRouter(deps Dependencies) *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
@@ -71,6 +74,40 @@ func NewRouter(deps Dependencies) *gin.Engine {
 			st := &handlers.Stats{Service: deps.StatsService}
 			v1.GET("/stats/overview", st.Overview)
 			v1.GET("/stats/timeseries", st.Timeseries)
+		}
+
+		if deps.AuthService != nil {
+			authHandlers := &handlers.Auth{
+				Service:      deps.AuthService,
+				CookieName:   deps.Config.AuthCookieName,
+				CookieSecure: deps.Config.AuthCookieSecure,
+				SameSite:     http.SameSiteLaxMode,
+			}
+			registerLimiter := middleware.NewRateLimiter(
+				deps.Config.AuthRateLimitRegister,
+				deps.Config.AuthRateLimitWindow,
+			)
+			loginLimiter := middleware.NewRateLimiter(
+				deps.Config.AuthRateLimitLogin,
+				deps.Config.AuthRateLimitWindow,
+			)
+			csrf := middleware.ProtectStateChange(deps.Config.CORSAllowedOrigins)
+
+			authGroup := v1.Group("/auth")
+			{
+				authGroup.POST("/register",
+					csrf,
+					middleware.LimitByIP(registerLimiter, "register"),
+					authHandlers.Register,
+				)
+				authGroup.POST("/login",
+					csrf,
+					middleware.LimitByIP(loginLimiter, "login"),
+					authHandlers.Login,
+				)
+				authGroup.POST("/logout", csrf, authHandlers.Logout)
+				authGroup.GET("/me", authHandlers.Me)
+			}
 		}
 	}
 

@@ -36,6 +36,7 @@ type Config struct {
 	TelegramMaxAttempts   int
 	TelegramRetryBase     time.Duration
 	TelegramHTTPTimeout   time.Duration
+	TelegramBotURL        string
 	LLMAPIKey             string
 	LLMBaseURL            string
 	AttackWindow          time.Duration
@@ -44,6 +45,13 @@ type Config struct {
 	WSPongWait            time.Duration
 	WSPingPeriod          time.Duration
 	LogLevel              string
+	// Auth / session cookies
+	SessionTTL            time.Duration
+	AuthCookieSecure      bool
+	AuthCookieName        string
+	AuthRateLimitRegister int
+	AuthRateLimitLogin    int
+	AuthRateLimitWindow   time.Duration
 }
 
 // Load reads configuration from environment variables.
@@ -80,6 +88,7 @@ func Load() (Config, error) {
 		TelegramMaxAttempts:   getInt("TELEGRAM_MAX_ATTEMPTS", 3),
 		TelegramRetryBase:     getDuration("TELEGRAM_RETRY_BASE_DELAY", 500*time.Millisecond),
 		TelegramHTTPTimeout:   getDuration("TELEGRAM_HTTP_TIMEOUT", 10*time.Second),
+		TelegramBotURL:        strings.TrimSpace(os.Getenv("TELEGRAM_BOT_URL")),
 		LLMAPIKey:             os.Getenv("LLM_API_KEY"),
 		LLMBaseURL:            strings.TrimSpace(os.Getenv("LLM_BASE_URL")),
 		AttackWindow:          getDuration("ATTACK_WINDOW", 15*time.Minute),
@@ -87,8 +96,16 @@ func Load() (Config, error) {
 		WSWriteWait:           getDuration("WS_WRITE_WAIT", 10*time.Second),
 		WSPongWait:            getDuration("WS_PONG_WAIT", 60*time.Second),
 		WSPingPeriod:          getDuration("WS_PING_PERIOD", 54*time.Second),
-		LogLevel: getEnv("LOG_LEVEL", "info"),
+		LogLevel:              getEnv("LOG_LEVEL", "info"),
+		SessionTTL:            getDuration("SESSION_TTL", 7*24*time.Hour),
+		AuthRateLimitRegister: getInt("AUTH_RATE_LIMIT_REGISTER", 5),
+		AuthRateLimitLogin:    getInt("AUTH_RATE_LIMIT_LOGIN", 10),
+		AuthRateLimitWindow:   getDuration("AUTH_RATE_LIMIT_WINDOW", 15*time.Minute),
 	}
+
+	// AUTH_COOKIE_SECURE defaults to true (production-safe). Local HTTP must set AUTH_COOKIE_SECURE=false explicitly.
+	cfg.AuthCookieSecure = getBool("AUTH_COOKIE_SECURE", true)
+	cfg.AuthCookieName = resolveAuthCookieName(cfg.AuthCookieSecure, strings.TrimSpace(os.Getenv("AUTH_COOKIE_NAME")))
 
 	// ML is optional. ML_ENABLED=false forces disable even if ML_SERVICE_URL is set.
 	// When ML_ENABLED is unset, ML is on only if ML_SERVICE_URL is non-empty.
@@ -195,7 +212,48 @@ func (c Config) validate() error {
 	if c.WSPingPeriod >= c.WSPongWait {
 		return fmt.Errorf("WS_PING_PERIOD must be less than WS_PONG_WAIT")
 	}
+	if c.SessionTTL <= 0 {
+		return fmt.Errorf("SESSION_TTL must be positive")
+	}
+	if c.AuthCookieName == "" {
+		return fmt.Errorf("AUTH_COOKIE_NAME must not be empty")
+	}
+	if c.AuthRateLimitRegister <= 0 {
+		return fmt.Errorf("AUTH_RATE_LIMIT_REGISTER must be positive")
+	}
+	if c.AuthRateLimitLogin <= 0 {
+		return fmt.Errorf("AUTH_RATE_LIMIT_LOGIN must be positive")
+	}
+	if c.AuthRateLimitWindow <= 0 {
+		return fmt.Errorf("AUTH_RATE_LIMIT_WINDOW must be positive")
+	}
 	return nil
+}
+
+// resolveAuthCookieName picks a cookie name. __Host- requires Secure and is used only then.
+func resolveAuthCookieName(secure bool, override string) string {
+	if override != "" {
+		return override
+	}
+	if secure {
+		return "__Host-ndr_session"
+	}
+	return "ndr_session"
+}
+
+func getBool(key string, fallback bool) bool {
+	v, ok := os.LookupEnv(key)
+	if !ok || strings.TrimSpace(v) == "" {
+		return fallback
+	}
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return fallback
+	}
 }
 
 // TelegramEnabled reports whether Telegram notifications are configured.
